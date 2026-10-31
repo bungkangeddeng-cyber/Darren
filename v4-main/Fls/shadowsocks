@@ -78,7 +78,7 @@ for user in ${data[@]}
         rm -f /etc/limit/shadowsocks/$user
         rm -f /etc/limit/shadowsocks/quota/$user
         rm -f /var/www/html/sodosokws-$user.txt
-      systemctl restart xray >> /dev/null 2>&1
+      NEED_RESTART=1
       else
       echo ""
       fi
@@ -92,4 +92,5 @@ for user in ${data[@]}
       echo ""
     fi
   done
+  if [[ "$NEED_RESTART" == "1" ]]; then systemctl restart xray >> /dev/null 2>&1; fi
 done

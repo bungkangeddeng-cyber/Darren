@@ -8,12 +8,15 @@ Xray changes use the same marker-insertion pattern as the menu scripts
 `xray run -test` before restart; on failure the backup is restored.
 SSH uses useradd/chpasswd/chage, same as addssh.
 """
-import json, os, re, shutil, subprocess, sys
+import json, os, re, shutil, subprocess, sys, threading
 from datetime import date, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-CFG = "/etc/xray/config.json"
+CFG = os.environ.get("VPN_API_CFG", "/etc/xray/config.json")
+XRAY_BIN = os.environ.get("VPN_API_XRAY_BIN", "/usr/local/bin/xray")
+RESTART_SCRIPT = os.environ.get("VPN_API_RESTART_SCRIPT", "")
+DATA_DIR = os.environ.get("VPN_API_DATA_DIR", "")  # staging: ganti /etc/<proto> dan /etc/ssh, default produksi tetap /etc
 AUTH = os.environ.get("VPN_API_AUTH", "")
 PORT = int(os.environ.get("VPN_API_PORT", "5890"))
 
@@ -27,6 +30,11 @@ def run_input(cmd, data, **kw):
     if isinstance(cmd, str):
         raise ValueError("shell commands are no longer allowed")
     return subprocess.run(cmd, input=data, capture_output=True, text=True, timeout=120, **kw)
+
+def data_path(*parts):
+    if DATA_DIR:
+        return os.path.join(DATA_DIR, *parts)
+    return os.path.join("/etc", *parts)
 
 def ok():
     return {"status": "success"}
@@ -65,13 +73,62 @@ def valid_iplimit(v):
     return 1 <= n <= 100
 
 def xray_test():
-    r = run(["/usr/local/bin/xray", "run", "-test", "-c", "/etc/xray/config.json"])
+    r = run([XRAY_BIN, "run", "-test", "-c", CFG])
     return "Configuration OK" in (r.stdout + r.stderr)
 
 def xray_restart():
+    # Staging/test override: a script that restarts the staging xray
+    # process (PID file) and exits 0 only if xray is alive afterwards.
+    # Production default stays systemctl.
+    if RESTART_SCRIPT:
+        r = run([RESTART_SCRIPT])
+        return r.returncode == 0
     run(["systemctl", "restart", "xray"])
     r = run(["systemctl", "is-active", "xray"])
     return r.stdout.strip() == "active"
+
+# --- Debounced restart: many account changes in one burst must NOT
+# restart xray once per account (that drops every connected user).
+# change_xray() only edits + validates the file, then schedules ONE
+# restart 2 seconds after the LAST change in the burst. If that restart
+# fails, the pre-burst backup is restored and xray is restarted again;
+# the failure is logged to stderr (API already returned success, so the
+# caller must still check that xray is active after ~3s).
+_restart_lock = threading.Lock()
+_config_lock = threading.Lock()
+_restart_timer = None
+_restart_backup = None
+
+def schedule_restart():
+    global _restart_timer, _restart_backup
+    with _restart_lock:
+        if _restart_backup is None:
+            _restart_backup = CFG + ".bak-api"
+        if _restart_timer is not None:
+            _restart_timer.cancel()
+        _restart_timer = threading.Timer(5.0, _do_restart)
+        _restart_timer.daemon = True
+        _restart_timer.start()
+
+def _do_restart():
+    global _restart_timer, _restart_backup
+    with _restart_lock:
+        _restart_timer = None
+        backup = _restart_backup
+        _restart_backup = None
+    # Hold config lock so no create/renew/delete can edit the file
+    # while xray is restarting from it (previous race: restart loaded
+    # a half-written config, failed, and restored the pre-burst backup,
+    # wiping accounts created in the same burst).
+    with _config_lock:
+        try:
+            if not xray_restart():
+                print("[vpn-api] restart gagal, kembalikan backup", flush=True)
+                if backup:
+                    shutil.copy(backup, CFG)
+                xray_restart()
+        except Exception as e:
+            print(f"[vpn-api] restart error: {e}", flush=True)
 
 def insert_xray(marker, comment, client_line):
     """Insert comment+client after marker line; return True if marker found."""
@@ -134,23 +191,26 @@ def remove_xray_user(user):
         return True
     return False
 def change_xray(fn):
-    shutil.copy(CFG, "/etc/xray/config.json.bak-api")
-    try:
-        res = fn()
-    except Exception as e:
-        shutil.copy("/etc/xray/config.json.bak-api", CFG)
-        return err(str(e))
-    if res is not True:
-        shutil.copy("/etc/xray/config.json.bak-api", CFG)
-        return res if isinstance(res, dict) else err("marker tidak ditemukan")
-    if not xray_test():
-        shutil.copy("/etc/xray/config.json.bak-api", CFG)
-        return err("validasi xray gagal, config dikembalikan")
-    if not xray_restart():
-        shutil.copy("/etc/xray/config.json.bak-api", CFG)
-        run(["systemctl", "restart", "xray"])
-        return err("restart xray gagal, config dikembalikan")
-    return ok()
+    with _config_lock:
+        # Keep the pre-burst backup for the debounced restart thread; do not
+        # overwrite it with an intermediate config while a restart is pending.
+        with _restart_lock:
+            pending = _restart_timer is not None
+        if not pending:
+            shutil.copy(CFG, CFG + ".bak-api")
+        try:
+            res = fn()
+        except Exception as e:
+            shutil.copy(CFG + ".bak-api", CFG)
+            return err(str(e))
+        if res is not True:
+            shutil.copy(CFG + ".bak-api", CFG)
+            return res if isinstance(res, dict) else err("marker tidak ditemukan")
+        if not xray_test():
+            shutil.copy(CFG + ".bak-api", CFG)
+            return err("validasi xray gagal, config dikembalikan")
+        schedule_restart()
+        return ok()
 
 def create_ssh(q):
     user, pw, exp, iplimit = q.get("user"), q.get("password"), q.get("exp"), q.get("iplimit", "1")
@@ -172,11 +232,13 @@ def create_ssh(q):
     if r.returncode != 0:
         run(["userdel", "-f", user])
         return err("chpasswd gagal")
-    os.makedirs("/etc/ssh", exist_ok=True)
-    os.makedirs("/etc/kyt/limit/ssh/ip", exist_ok=True)
-    with open("/etc/ssh/.ssh.db", "a") as f:
+    _ssh_dir = data_path("ssh") if DATA_DIR else "/etc/ssh"
+    _ip_dir = data_path("kyt/limit/ssh/ip") if DATA_DIR else "/etc/kyt/limit/ssh/ip"
+    os.makedirs(_ssh_dir, exist_ok=True)
+    os.makedirs(_ip_dir, exist_ok=True)
+    with open(os.path.join(_ssh_dir, ".ssh.db"), "a") as f:
         f.write(f"#ssh# {user} {pw} 0 {iplimit} {expd}\n")
-    with open(f"/etc/kyt/limit/ssh/ip/{user}", "w") as f:
+    with open(os.path.join(_ip_dir, user), "w") as f:
         f.write(str(iplimit) + "\n")
     return ok()
 
@@ -207,8 +269,8 @@ def create_xray_proto(kind, q):
             return a  # gRPC optional; WS is the tested path
         res = change_xray(fn2)
         if res.get("status") == "success":
-            os.makedirs("/etc/vmess", exist_ok=True)
-            with open("/etc/vmess/.vmess.db", "a") as f:
+            os.makedirs(data_path("vmess"), exist_ok=True)
+            with open(data_path("vmess", ".vmess.db"), "a") as f:
                 f.write(f"### {user} {expd} {uuid} 100 1\n")
         return res
     if kind == "vless":
@@ -219,8 +281,8 @@ def create_xray_proto(kind, q):
             return insert_xray("#vless", f"#& {user} {expd}", '},{"id": "%s","email": "%s"' % (uuid, user))
         res = change_xray(fn)
         if res.get("status") == "success":
-            os.makedirs("/etc/vless", exist_ok=True)
-            with open("/etc/vless/.vless.db", "a") as f:
+            os.makedirs(data_path("vless"), exist_ok=True)
+            with open(data_path("vless", ".vless.db"), "a") as f:
                 f.write(f"### {user} {expd} {uuid} 100 1\n")
         return res
     if kind == "trojan":
@@ -231,8 +293,8 @@ def create_xray_proto(kind, q):
             return insert_xray("#trojanws", f"#! {user} {expd}", '},{"password": "%s","email": "%s"' % (pw, user))
         res = change_xray(fn)
         if res.get("status") == "success":
-            os.makedirs("/etc/trojan", exist_ok=True)
-            with open("/etc/trojan/.trojan.db", "a") as f:
+            os.makedirs(data_path("trojan"), exist_ok=True)
+            with open(data_path("trojan", ".trojan.db"), "a") as f:
                 f.write(f"### {user} {expd} {pw} 100 1\n")
         return res
     if kind == "ss":
@@ -243,8 +305,8 @@ def create_xray_proto(kind, q):
             return insert_xray("#ssws", f"#!! {user} {expd}", '},{"password": "%s","method": "aes-128-gcm","email": "%s"' % (pw, user))
         res = change_xray(fn)
         if res.get("status") == "success":
-            os.makedirs("/etc/shadowsocks", exist_ok=True)
-            with open("/etc/shadowsocks/.shadowsocks.db", "a") as f:
+            os.makedirs(data_path("shadowsocks"), exist_ok=True)
+            with open(data_path("shadowsocks", ".shadowsocks.db"), "a") as f:
                 f.write(f"### {user} {expd} {pw}\n")
         return res
     return err("proto tidak dikenal")
@@ -265,7 +327,7 @@ def renew(q):
         if r.returncode != 0:
             return err("user ssh tidak ada")
         try:
-            p = "/etc/ssh/.ssh.db"
+            p = data_path("ssh", ".ssh.db") if DATA_DIR else "/etc/ssh/.ssh.db"
             ls = open(p).read().splitlines(True)
             out = []
             for ln in ls:
@@ -282,21 +344,25 @@ def renew(q):
             pass
         return ok()
     # Xray: update comment date lines for this user (expiry is menu-side only)
-    with open(CFG) as f:
-        txt = f.read()
-    txt2 = re.sub(r"(^### |^## |^#& |^#! |^#!! )" + re.escape(user) + r" \d{4}-\d{2}-\d{2}",
-                  r"\g<1>" + user + " " + expd, txt, flags=re.M)
-    if txt2 == txt:
-        return err("user tidak ditemukan, renew gagal")
-    shutil.copy(CFG, "/etc/xray/config.json.bak-api")
-    with open(CFG, "w") as f:
-        f.write(txt2)
-    if not xray_test():
-        shutil.copy("/etc/xray/config.json.bak-api", CFG)
-        return err("validasi xray gagal")
-    xray_restart()
+    with _config_lock:
+        with open(CFG) as f:
+            txt = f.read()
+        txt2 = re.sub(r"(^### |^## |^#& |^#! |^#!! )" + re.escape(user) + r" \d{4}-\d{2}-\d{2}",
+                      r"\g<1>" + user + " " + expd, txt, flags=re.M)
+        if txt2 == txt:
+            return err("user tidak ditemukan, renew gagal")
+        with _restart_lock:
+            pending = _restart_timer is not None
+        if not pending:
+            shutil.copy(CFG, CFG + ".bak-api")
+        with open(CFG, "w") as f:
+            f.write(txt2)
+        if not xray_test():
+            shutil.copy(CFG + ".bak-api", CFG)
+            return err("validasi xray gagal")
+        schedule_restart()
     # FIXED: keep per-protocol db expiry in sync with config comments.
-    _dbmap = {"vmess": "/etc/vmess/.vmess.db", "vless": "/etc/vless/.vless.db", "trojan": "/etc/trojan/.trojan.db", "ss": "/etc/shadowsocks/.shadowsocks.db"}
+    _dbmap = {"vmess": data_path("vmess", ".vmess.db"), "vless": data_path("vless", ".vless.db"), "trojan": data_path("trojan", ".trojan.db"), "ss": data_path("shadowsocks", ".shadowsocks.db")}
     if proto in _dbmap:
         try:
             _pp = _dbmap[proto]
@@ -321,9 +387,10 @@ def delete(q):
         run(["userdel", "-f", user])
         # bersihkan .ssh.db: cocok persis kolom login (kolom ke-2)
         try:
-            with open("/etc/ssh/.ssh.db") as f:
+            _db = data_path("ssh", ".ssh.db") if DATA_DIR else "/etc/ssh/.ssh.db"
+            with open(_db) as f:
                 dblines = f.readlines()
-            with open("/etc/ssh/.ssh.db", "w") as f:
+            with open(_db, "w") as f:
                 for dl in dblines:
                     parts = dl.split()
                     if len(parts) >= 2 and parts[1] == user:
@@ -331,7 +398,8 @@ def delete(q):
                     f.write(dl)
         except OSError:
             pass
-        run(["rm", "-f", f"/etc/kyt/limit/ssh/ip/{user}", f"/etc/ssh/{user}"])
+        _ip = data_path("kyt/limit/ssh/ip", user) if DATA_DIR else f"/etc/kyt/limit/ssh/ip/{user}"
+        run(["rm", "-f", _ip])
         r = run(["id", user])
         return ok() if r.returncode != 0 else err("user SSH masih ada")
     def fn():
@@ -339,7 +407,7 @@ def delete(q):
     res = change_xray(fn)
     # .db per-proto hanya dibersihkan bila config memastikan user tiada
     if user_absent(user):
-        dbmap = {"vmess": "/etc/vmess/.vmess.db", "vless": "/etc/vless/.vless.db", "trojan": "/etc/trojan/.trojan.db", "ss": "/etc/shadowsocks/.shadowsocks.db"}
+        dbmap = {"vmess": data_path("vmess", ".vmess.db"), "vless": data_path("vless", ".vless.db"), "trojan": data_path("trojan", ".trojan.db"), "ss": data_path("shadowsocks", ".shadowsocks.db")}
         if proto in dbmap:
             try:
                 pp = dbmap[proto]
@@ -389,4 +457,4 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 if __name__ == "__main__":
-    HTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()

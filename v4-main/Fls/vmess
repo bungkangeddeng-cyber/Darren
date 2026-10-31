@@ -32,6 +32,7 @@ function con() {
 
   while true; do
   sleep 5
+  NEED_RESTART=0
   data=($(cat /etc/xray/config.json | grep '^###' | cut -d ' ' -f 2 | sort | uniq))
   if [[ ! -e /etc/limit/vmess ]]; then
   mkdir -p /etc/limit/vmess
@@ -69,7 +70,7 @@ for user in ${data[@]}
       send-log
       rm -rf /etc/limit/vmess/${user}
 	  sed -i "d" /etc/vmess/$user
-      systemctl restart xray >> /dev/null 2>&1
+      NEED_RESTART=1
       else
       echo ""
       fi
@@ -83,4 +84,5 @@ for user in ${data[@]}
       echo ""
     fi
   done
+  if [[ "$NEED_RESTART" == "1" ]]; then systemctl restart xray >> /dev/null 2>&1; fi
 done

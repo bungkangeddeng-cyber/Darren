@@ -22,8 +22,8 @@ ns_domain_cloudflare() {
     else
 	SUB_DOMAIN=${SUB}."xdg-boost.my.id"
 	NS_DOMAIN=dns.${SUB_DOMAIN}
-	CF_ID=ziexyuan@gmail.com
-        CF_KEY=defec9840c857888b6d1986354d45d617c83a
+	CF_ID="${CF_ID:-}"  # isi lewat env CF_ID, jangan hardcode
+        CF_KEY="${CF_KEY:-}"  # isi lewat env CF_KEY, jangan hardcode
 	set -euo pipefail
 	IP=$(wget -qO- ipinfo.io/ip)
 	echo "Updating DNS NS for ${NS_DOMAIN}..."

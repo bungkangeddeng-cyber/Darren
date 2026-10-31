@@ -10,7 +10,7 @@ const { esc } = require('../src/format');
 const { apiBase, apiAuth, domain } = config.vpn;
 const cf = config.cloudfront;
 
-const api = axios.create({ baseURL: apiBase, timeout: 25000 });
+const api = axios.create({ baseURL: apiBase, timeout: 60000 });
 
 function apiParams(extra = {}) {
   return { auth: apiAuth, ...extra };
@@ -19,7 +19,7 @@ function apiParams(extra = {}) {
 // Server default (id 0 / null) = apiBase/apiAuth dari .env (perilaku lama).
 // Server terdaftar = baris tabel servers (api_base + api_auth + domain).
 function apiFor(srv) {
-  if (srv && srv.api_base) return axios.create({ baseURL: srv.api_base.replace(/\/$/, ''), timeout: 25000 });
+  if (srv && srv.api_base) return axios.create({ baseURL: srv.api_base.replace(/\/$/, ''), timeout: 60000 });
   return api;
 }
 function apiAuthFor(srv) {

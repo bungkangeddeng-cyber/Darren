@@ -32,6 +32,7 @@ function vmip(){
 #LIMITVMESSIP
 cek_lock
 sleep 10
+NEED_RESTART=0
 data=( `ls /etc/kyt/limit/vmess/ip`);
 #Created By Newbie Store
     for user in "${data[@]}"
@@ -45,24 +46,26 @@ data=( `ls /etc/kyt/limit/vmess/ip`);
 				sed -i '/#vmess$/a\### '"$user $exp $uuid"'' /etc/xray/.lock.db
 				sed -i "/^### $user $exp/,/^},{/d" /etc/xray/config.json
 				echo -n > /var/log/xray/access.log
-                systemctl restart xray >> /dev/null 2>&1
+                NEED_RESTART=1
                 send_log
                 else
             echo -ne
         fi
         sleep 0.1
     done
+    if [[ \"$NEED_RESTART\" == \"1\" ]]; then systemctl restart xray >> /dev/null 2>&1; fi
 }
 function vlip(){
 #LIMITVLESSIP
 cek_lock
 sleep 10
+NEED_RESTART=0
 data=( `ls /etc/kyt/limit/vless/ip`);
 #Created By Newbie Store
     for user in "${data[@]}"
     do
         iplimit=$(cat /etc/kyt/limit/vless/ip/$user)
-        ehh=$(cat /var/log/xray/access.log | grep "$user" | cut -d " " -f 3 | sed 's/tcp://g' | cut -d ":" -f 1 | sort | uniq);
+        ehh=$(cat /var/log/xray/access.log | grep -w "$user" | cut -d " " -f 3 | sed 's/tcp://g' | cut -d ":" -f 1 | sort | uniq);
         cekcek=$(echo -e "$ehh" | wc -l);
         if [[ $cekcek -gt $iplimit ]]; then
 			uuid=$(grep -E "^},{" "/etc/xray/config.json" |  grep -i '"'"${user}"'"' | cut -d " " -f 2 | cut -d '"' -f 2 | uniq )
@@ -70,24 +73,26 @@ data=( `ls /etc/kyt/limit/vless/ip`);
 				sed -i '/#vless$/a\#& '"$user $exp $uuid"'' /etc/xray/.lock.db
 				sed -i "/^#& $user $exp/,/^},{/d" /etc/xray/config.json
 				echo -n > /var/log/xray/access.log
-                  systemctl restart xray >> /dev/null 2>&1
+                  NEED_RESTART=1
                   send_log
                 else
             echo -ne
         fi
         sleep 0.1
     done
+    if [[ \"$NEED_RESTART\" == \"1\" ]]; then systemctl restart xray >> /dev/null 2>&1; fi
 }
 function trip(){
 #LIMITIPTROJAN
 cek_lock
 sleep 10
+NEED_RESTART=0
 data=( `ls /etc/kyt/limit/trojan/ip`);
 #Created By Newbie Store
     for user in "${data[@]}"
     do
         iplimit=$(cat /etc/kyt/limit/trojan/ip/$user)
-        ehh=$(cat /var/log/xray/access.log | grep "$user" | cut -d " " -f 3 | sed 's/tcp://g' | cut -d ":" -f 1 | sort | uniq);
+        ehh=$(cat /var/log/xray/access.log | grep -w "$user" | cut -d " " -f 3 | sed 's/tcp://g' | cut -d ":" -f 1 | sort | uniq);
         cekcek=$(echo -e "$ehh" | wc -l);
         if [[ $cekcek -gt $iplimit ]]; then
 			uuid=$(grep -E "^},{" "/etc/xray/config.json" |  grep -i '"'"${user}"'"' | cut -d " " -f 2 | cut -d '"' -f 2 | uniq )
@@ -95,13 +100,14 @@ data=( `ls /etc/kyt/limit/trojan/ip`);
 				sed -i '/#trojan$/a\#! '"$user $exp $uuid"'' /etc/xray/.lock.db
 				sed -i "/^#! $user $exp/,/^},{/d" /etc/xray/config.json
 				echo -n > /var/log/xray/access.log
-                  systemctl restart xray >> /dev/null 2>&1
+                  NEED_RESTART=1
                   send_log
                 else
             echo -ne
         fi
         sleep 0.1
     done
+    if [[ \"$NEED_RESTART\" == \"1\" ]]; then systemctl restart xray >> /dev/null 2>&1; fi
 }
 
 if [[ ${1} == "vmip" ]]; then

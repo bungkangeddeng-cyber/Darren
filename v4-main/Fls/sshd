@@ -30,7 +30,7 @@ Port 2223
 
 # Authentication:
 
-#LoginGraceTime 2m
+LoginGraceTime 60
 PermitRootLogin yes
 #StrictModes yes
 #MaxAuthTries 6
@@ -69,7 +69,7 @@ ChallengeResponseAuthentication no
 #KerberosGetAFSToken no
 
 # GSSAPI options
-#GSSAPIAuthentication no
+GSSAPIAuthentication no
 #GSSAPICleanupCredentials yes
 #GSSAPIStrictAcceptorCheck yes
 #GSSAPIKeyExchange no
@@ -98,11 +98,11 @@ PrintMotd no
 #UseLogin no
 #PermitUserEnvironment no
 #Compression delayed
-#ClientAliveInterval 0
-#ClientAliveCountMax 3
-#UseDNS no
+ClientAliveInterval 30
+ClientAliveCountMax 3
+UseDNS no
 #PidFile /var/run/sshd.pid
-#MaxStartups 10:30:100
+MaxStartups 50:30:100
 #PermitTunnel no
 #ChrootDirectory none
 #VersionAddendum none

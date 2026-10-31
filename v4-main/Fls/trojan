@@ -68,7 +68,7 @@ for user in ${data[@]}
       send-log
       rm -rf /etc/limit/trojan/${user}
 	  sed -i "d" /etc/trojan/$user
-      systemctl restart xray >> /dev/null 2>&1
+      NEED_RESTART=1
       else
       echo ""
       fi
@@ -82,5 +82,5 @@ for user in ${data[@]}
       echo ""
     fi
   done
+  if [[ "$NEED_RESTART" == "1" ]]; then systemctl restart xray >> /dev/null 2>&1; fi
 done
-

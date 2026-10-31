@@ -76,3 +76,39 @@ Metode: audit statis + cek syntax saja, tanpa menjalankan server.
   ini mengandung token akses + refresh Google. Token lama itu sudah
   pernah ada di zip asli yang publik, jadi harus dianggap bocor dan
   dicabut oleh pemilik akunnya, bukan dipakai ulang.
+
+## Tambahan 2026-11-01 — Audit SSH+Xray, perbaikan + tes live di mila
+- Cfg/config.json: kunci JSON ganda (stats/api/policy) digabung jadi
+  satu; outbound diberi tag (direct, proxy, blocked, block) sehingga
+  rule routing tidak lagi merujuk tag yang tidak ada; sniffing
+  http/tls diaktifkan di inbound WS/gRPC.
+- Cfg/xray.conf (Nginx): timeout 86400000m -> 360s; proxy_protocol
+  dihapus dari listen 1012/1013 (tidak ada pengirim PROXY protocol);
+  proxy_read/send_timeout WS 3600s, grpc_read_timeout 3600s;
+  TLSv1.1 dihapus.
+- Cfg/haproxy.cfg: inspect-delay 500ms -> 200ms.
+- Fls/sshd: ClientAliveInterval 30, ClientAliveCountMax 3, UseDNS no,
+  MaxStartups 50:30:100, LoginGraceTime 60 (eksplisit, bukan default).
+- Cfg/dropbear.conf: receive window 65536 -> 262144.
+- Cfg/nginx.conf: worker_connections 2048 -> 4096.
+- Api/vpn-api.py: ThreadingHTTPServer (bukan single-thread);
+  restart Xray di-debounce 2 detik (satu restart per burst perubahan,
+  bukan per akun); CFG/XRAY_BIN/RESTART_SCRIPT bisa di-override
+  lewat env untuk staging (default produksi tidak berubah).
+- bot-js/modules/vpn.js: timeout API 25 detik -> 60 detik.
+- Fls/limit IP/kuota: restart Xray sekali per sweep (flag
+  NEED_RESTART), bukan per user pelanggar; grep IP limit pakai -w.
+- menu/auto-kill (menu.zip + bot.zip): cron tendang opsi 1
+  diperbaiki $max -> $iplimit.
+- Cfg/slowdns.sh + Vpn/xray.zip: kredensial hardcode diganti
+  placeholder/env (nilai tidak pernah ditampilkan).
+- Catatan tes: staging di mila user-space (tanpa sudo, tanpa
+  ganggu layanan live mila). Lihat TEST-SSH-XRAY.md untuk hasil
+  tes live yang sebenarnya, bukan klaim teori.
+- Cfg/haproxy.cfg: frontend http/https default_backend diubah dari
+  dropbear_backend ke ws_backend (Nginx). Terbukti live di mila:
+  acl hdr(Upgrade) di mode tcp selalu gagal, WS jatuh ke Dropbear
+  lalu putus (SD, banner SSH 77 byte). Dengan default ws, WS via
+  HAProxy 200 (0,96 detik example, 2,49 detik Google) dan log
+  HAProxy menunjukkan ws_backend, Nginx 101. SSH polos tetap
+  lewat 22/143 langsung, SSH-WS lewat Nginx path /.
