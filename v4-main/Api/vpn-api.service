@@ -1,0 +1,13 @@
+[Unit]
+Description=VPN API untuk bot-js v4 (localhost 5890)
+After=network.target xray.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/vpn-api.py
+EnvironmentFile=/etc/vpn-api/auth.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""trial-killer: lapis kedua penghapus trial 1 jam + akun reguler kedaluwarsa,
+ independen dari proses bot.
+
+Dijalankan cron tiap 5 menit. Membaca vpn_accounts di DB bot, mencari
+trial (is_trial=1) yang trial_expires_at-nya sudah lewat (UTC, sama seperti
+sweeper bot), lalu menghapusnya lewat VPN API lokal (alamat dibaca dari .env bot: VPN_API_BASE).
+
+JAMINAN yang tidak dimiliki sweeper bot lama:
+- Baris DB HANYA dihapus setelah penghapusan di server TERVERIFIKASI
+  (SSH: user sistem sudah tidak ada; Xray: baris '### username' sudah
+  tidak ada di /etc/xray/config.json). Kalau verifikasi gagal, baris
+  dipertahankan dan dicoba lagi di run berikutnya, jadi trial tidak
+  pernah 'dianggap mati' padahal masih hidup di server.
+- Berjalan lewat cron, jadi tetap jalan walau proses bot sedang mati.
+
+Log: /var/log/trial-killer.log
+Pemakaian: trial-killer.py <path-bot.db>  (mis. /root/wendi-bot-js/data/bot.db)
+Auth API dibaca dari <bot-dir>/.env (VPN_API_AUTH), tanpa ditampilkan.
+"""
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone, timedelta
+
+DEFAULT_API_BASE = "http://127.0.0.1:5890"
+XRAY_CONFIG = "/etc/xray/config.json"
+LOG_FILE = "/var/log/trial-killer.log"
+
+
+def log(msg):
+    line = "%s %s" % (datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M:%S WIB"), msg)
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def read_bot_env(db_path):
+    bot_dir = os.path.dirname(os.path.dirname(os.path.abspath(db_path)))
+    env_path = os.path.join(bot_dir, ".env")
+    auth = ""
+    api_base = DEFAULT_API_BASE
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("VPN_API_AUTH="):
+                    auth = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif line.startswith("VPN_API_BASE="):
+                    v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if v:
+                        api_base = v.rstrip("/")
+    except Exception:
+        pass
+    return auth, api_base
+
+
+def api_delete(proto, user, auth, api_base):
+    params = urllib.parse.urlencode({"auth": auth, "proto": proto, "user": user})
+    req = urllib.request.Request(api_base + "/delete?" + params, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode() or "{}")
+            return data.get("status", "success") == "success", data
+    except Exception as e:
+        return False, {"error": str(e)}
+
+
+def server_account_gone(proto, username):
+    if proto == "zivpn":
+        # Zivpn tidak terpasang di server: tidak ada akun server untuk dibunuh.
+        return True
+    if proto == "ssh":
+        r = subprocess.run(["id", username], capture_output=True)
+        return r.returncode != 0
+    # VMess/VLess/Trojan/Shadowsocks: klien Xray ditandai email atau komentar API
+    try:
+        with open(XRAY_CONFIG) as f:
+            cfg = f.read()
+        has_email = re.search(r'"email": "' + re.escape(username) + r'"', cfg) is not None
+        has_comment = re.search(r"(^### |^## |^#& |^#! |^#!! )" + re.escape(username) + r"( |$)", cfg, re.M) is not None
+        return not has_email and not has_comment
+    except Exception:
+        return False
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: trial-killer.py <bot.db>", file=sys.stderr)
+        return 2
+    db_path = sys.argv[1]
+    auth, api_base = read_bot_env(db_path)
+    try:
+        con = sqlite3.connect(db_path)
+        rows = con.execute(
+            "SELECT proto, username FROM vpn_accounts "
+            "WHERE (is_trial = 1 AND trial_expires_at IS NOT NULL "
+            "AND trial_expires_at < datetime('now')) "
+            "OR (is_trial = 0 AND expiry < date('now'))"
+        ).fetchall()
+    except Exception as e:
+        log("ERROR baca DB %s: %s" % (db_path, e))
+        return 1
+    if not rows:
+        return 0
+    for proto, username in rows:
+        ok, data = api_delete(proto, username, auth, api_base)
+        if not ok:
+            log("API-FAIL %s/%s dipertahankan, coba lagi run berikutnya: %s" % (proto, username, data))
+            continue
+        if not server_account_gone(proto, username):
+            log("VERIFY-FAIL %s/%s masih ada di server, dipertahankan" % (proto, username))
+            continue
+        try:
+            con.execute("DELETE FROM vpn_accounts WHERE username = ? AND proto = ?", (username, proto))
+            con.commit()
+            log("DELETED %s/%s" % (proto, username))
+        except Exception as e:
+            log("ERROR hapus DB %s/%s: %s" % (proto, username, e))
+    con.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
