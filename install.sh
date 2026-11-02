@@ -171,21 +171,21 @@ pm2 startup systemd -u root --hp /root 2>/dev/null || echo "pm2 startup perlu di
 read -r -p "Instal Xray juga? [y/N] " install_xray || true
 if [[ "$install_xray" =~ ^[Yy]$ ]]; then
   echo "Menginstal Xray dari release resmi XTLS..."
-  tag="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)"
+  tag="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)" || tag=""
   if [ -z "$tag" ]; then
     echo "Gagal mendapatkan versi Xray terbaru. Lewati instalasi Xray." >&2
   else
     cd /tmp
-    curl -fsSL -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/Xray-linux-64.zip"
-    unzip -o xray.zip -d /tmp/xray-bin
-    install -m 755 /tmp/xray-bin/xray /usr/local/bin/xray
-    mkdir -p /etc/xray
-    if [ ! -f /etc/xray/config.json ]; then
-      cp "$SRC_DIR/v4-main/Cfg/config.json" /etc/xray/config.json
-      echo "Config Xray disalin dari Cfg/config.json (template bermarker)."
-      echo "Periksa domain/UUID di config itu sebelum dipakai produksi."
-    fi
-    cat > /etc/systemd/system/xray.service <<EOF
+    if curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/Xray-linux-64.zip"; then
+      unzip -o xray.zip -d /tmp/xray-bin
+      install -m 755 /tmp/xray-bin/xray /usr/local/bin/xray
+      mkdir -p /etc/xray
+      if [ ! -f /etc/xray/config.json ]; then
+        cp "$SRC_DIR/v4-main/Cfg/config.json" /etc/xray/config.json
+        echo "Config Xray disalin dari Cfg/config.json (template bermarker)."
+        echo "Periksa domain/UUID di config itu sebelum dipakai produksi."
+      fi
+      cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
 Description=Xray
 After=network.target
@@ -196,13 +196,16 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    if /usr/local/bin/xray run -test -c /etc/xray/config.json; then
-      systemctl enable --now xray
-      echo "Xray aktif."
+      systemctl daemon-reload
+      if /usr/local/bin/xray run -test -c /etc/xray/config.json; then
+        systemctl enable --now xray
+        echo "Xray aktif."
+      else
+        echo "PERINGATAN: config Xray gagal validasi. Xray TIDAK dijalankan."
+        echo "Perbaiki /etc/xray/config.json lalu: systemctl enable --now xray"
+      fi
     else
-      echo "PERINGATAN: config Xray gagal validasi. Xray TIDAK dijalankan."
-      echo "Perbaiki /etc/xray/config.json lalu: systemctl enable --now xray"
+      echo "Gagal mengunduh Xray ${tag} (aset release bisa sedang ditarik/diperbarui atau jaringan sesaat). Lewati instalasi Xray." >&2
     fi
   fi
 else
