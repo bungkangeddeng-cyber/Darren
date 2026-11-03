@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installer v4-main (versi perbaikan) untuk VPS baru.
-# Yang diinstal: bot-js (Telegram) + VPN API lokal (port 5890, localhost saja).
-# Xray bersifat opsional dan hanya diinstal bila kamu memilihnya.
+# Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
+# Yang diinstal: bot-js (Telegram) + VPN API lokal (port 5890, localhost saja),
+# Xray opsional, menu utama SSH (menu.zip -> /usr/bin), dan vnstat untuk traffic menu.
+# Uninstaller pasangannya: uninstall.sh (repo yang sama).
 #
 # Cara pakai di VPS baru (sebagai root):
 #   curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
@@ -212,7 +213,38 @@ else
   echo "Xray dilewati. Akun non-CF butuh Xray yang sudah berjalan di server ini."
 fi
 
-# ---------- 10. Verifikasi ----------
+# ---------- 10. Menu utama (bagian dari script lengkap) ----------
+# Menu SSH klasik (menu.zip) tidak dipasang installer lama, padahal itu
+# bagian dari script lengkap. Dipasang di sini agar perintah `menu` tersedia.
+# Jalur config selaras: menu, vpn-api, dan service xray sama-sama memakai
+# /etc/xray/config.json, jadi tidak ada split-brain antar pengelola.
+echo "Memasang menu utama..."
+MENU_ZIP="$SRC_DIR/v4-main/Cdy/menu.zip"
+if [ -f "$MENU_ZIP" ]; then
+  MENU_TMP="$(mktemp -d)"
+  unzip -o -q "$MENU_ZIP" -d "$MENU_TMP"
+  chmod +x "$MENU_TMP"/menu/*
+  cp -a "$MENU_TMP"/menu/. /usr/bin/
+  rm -rf "$MENU_TMP"
+  mkdir -p /etc/xray
+  MENU_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [ -n "$VPN_DOMAIN" ]; then
+    echo "$VPN_DOMAIN" > /etc/xray/domain
+  elif [ ! -f /etc/xray/domain ]; then
+    echo "${MENU_IP:-127.0.0.1}" > /etc/xray/domain
+  fi
+  echo "${MENU_IP:-127.0.0.1}" > /usr/bin/ipsave
+  apt-get install -y vnstat 2>/dev/null || echo "vnstat gagal diinstal, traffic di menu akan tampil 0."
+  if [ -x /usr/bin/menu ]; then
+    echo "Menu utama terpasang. Ketik: menu"
+  else
+    echo "PERINGATAN: menu gagal terpasang." >&2
+  fi
+else
+  echo "PERINGATAN: $MENU_ZIP tidak ditemukan, menu dilewati." >&2
+fi
+
+# ---------- 11. Verifikasi ----------
 echo ""
 echo "=== Verifikasi ==="
 systemctl is-active vpn-api || echo "vpn-api TIDAK aktif — cek: journalctl -u vpn-api -n 50"
