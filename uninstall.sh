@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Uninstaller script Darren (pasangan install.sh).
-# Menghapus yang dipasang install.sh: bot-js (pm2), vpn-api, Xray, menu utama.
+# Menghapus yang dipasang install.sh: bot-js (pm2), vpn-api, Xray, menu utama, permission (cek-izin).
 # TIDAK menghapus: Node.js, npm, pm2, dan paket sistem (alat umum, dipakai
 # lagi saat install ulang). Service startup pm2 juga dibiarkan (kosong,
 # tidak mengganggu install ulang).
@@ -60,6 +60,12 @@ else
   echo "menu.zip tidak ditemukan, hanya /usr/bin/menu + /usr/bin/ipsave yang dihapus."
 fi
 rm -f /usr/bin/menu /usr/bin/ipsave
+
+# 3b. Permission baru (cek-izin): dihapus eksplisit supaya uninstall tetap
+# total walau menu.zip lokal di VPS masih versi lama (tanpa cek-izin).
+# Cache izin ikut terhapus bersama /etc/xray di langkah 4.
+rm -f /usr/bin/cek-izin /var/log/izin.log
+rm -rf /tmp/menu-baru
 
 # 4. File aplikasi + source installer + sisa unduhan Xray
 rm -rf /root/bot-js /root/vpn-api.py /etc/vpn-api /usr/local/bin/xray /etc/xray /root/darren-install
