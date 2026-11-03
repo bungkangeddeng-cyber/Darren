@@ -21,6 +21,34 @@ Xray secara opsional. BotVPN2 lama tidak diinstal secara default.
 Bila kamu sudah meng-clone repo ini ke VPS, cukup jalankan
 `./install.sh` dari root repo — installer akan memakai source lokal.
 
+Untuk install total (menghapus semua instalasi SC lama dulu, dengan
+backup): jalankan `./install.sh --total`. Tanpa flag itu, bila
+instalasi lama ditemukan, installer akan bertanya dulu sebelum
+menghapus total.
+
+## Uninstall total (sebagai root)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/uninstall.sh -o uninstall.sh
+chmod +x uninstall.sh
+./uninstall.sh
+```
+
+Saat diminta konfirmasi, ketik `YA`. Script akan membackup dulu ke
+`/root/darren-uninstall-backup-<waktu>/`, lalu menghapus bot (pm2),
+service vpn-api dan xray, file aplikasi, menu utama termasuk
+permission (`cek-izin` + log + cache), dan source installer.
+Akun-akun ikut terhapus.
+
+Yang sengaja TIDAK dihapus: node, npm, dan pm2. Entri server di
+daftar izin permission tetap ada di repo (tidak mengganggu); hapus
+barisnya dari `v4-main/Cdy/izin-servers.txt` bila server itu tidak
+dipakai lagi.
+
+Bila isi `uninstall.sh` yang terunduh belum menyebut `cek-izin`,
+berarti cache GitHub belum segar — tunggu beberapa menit lalu
+unduh ulang.
+
 ## Keamanan — baca dulu
 
 - Repo ini publik. Jangan pernah menaruh token, password, atau
@@ -37,6 +65,7 @@ Bila kamu sudah meng-clone repo ini ke VPS, cukup jalankan
 ## Struktur
 
 - `install.sh` — installer VPS baru
+- `uninstall.sh` — uninstall total (backup dulu, lalu hapus bot, API, Xray, menu, permission)
 - `v4-main/` — source yang sudah diperbaiki (bot-js, BotVPN2, Api, Cfg, Fls, Vpn, dll)
 - `v4-main/CHANGELOG-FIXED.md` — apa yang diperbaiki dan apa yang belum
 - `BUGS-v4-main.md` — laporan audit bug asli

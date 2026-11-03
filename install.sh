@@ -8,6 +8,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
 #   chmod +x install.sh
 #   ./install.sh
+#   ./install.sh --total   # install total: backup + hapus instalasi lama, lalu install baru
 #
 # Script ini TIDAK berisi secret apapun. Token bot dan ID admin diminta
 # lewat prompt saat instalasi, auth API dibuat acak, dan file .env
@@ -23,6 +24,87 @@ if [ "$(id -u)" != "0" ]; then
   echo "Jalankan installer ini sebagai root." >&2
   exit 1
 fi
+
+# ---------- Argumen ----------
+TOTAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --total) TOTAL=1 ;;
+    --help|-h)
+      echo "Pakai: ./install.sh [--total]"
+      echo "  --total   Install total: backup lalu hapus semua instalasi SC lama,"
+      echo "            baru install baru (token bot + admin diminta ulang)."
+      echo "  Tanpa --total, bila instalasi lama ditemukan installer akan bertanya"
+      echo "  dulu sebelum menghapus total."
+      exit 0
+      ;;
+    *) echo "Argumen tidak dikenal: $arg (pakai --help)" >&2; exit 1 ;;
+  esac
+done
+
+# Bila script dijalankan dari dalam source lama, jalankan ulang dari /tmp
+# supaya source lama bisa dihapus total tanpa menghapus script yang sedang jalan.
+if [ "$TOTAL" = 1 ]; then
+  script_path="$(readlink -f "$0")"
+  case "$script_path" in
+    "$SRC_DIR"/*)
+      echo "Menjalankan ulang dari /tmp agar source lama bisa dihapus total..."
+      cp "$script_path" /tmp/install-total-$$.sh
+      exec bash /tmp/install-total-$$.sh --total
+      ;;
+  esac
+fi
+
+# Hapus total instalasi SC lama (dipakai mode --total / jawaban y).
+# TIDAK menghapus: node/npm/pm2, backup yang baru dibuat, dan SRC_DIR
+# (sudah berisi source baru saat fungsi ini dipanggil).
+hapus_instalasi_lama() {
+  command -v unzip >/dev/null 2>&1 || apt-get install -y unzip 2>/dev/null || true
+  pm2 delete ripzz-bot-js 2>/dev/null || true
+  pm2 save 2>/dev/null || true
+  systemctl disable --now vpn-api 2>/dev/null || true
+  systemctl disable --now xray 2>/dev/null || true
+  rm -f /etc/systemd/system/vpn-api.service /etc/systemd/system/xray.service
+  systemctl daemon-reload 2>/dev/null || true
+  if [ -f "$SRC_DIR/v4-main/Cdy/menu.zip" ]; then
+    unzip -Z1 "$SRC_DIR/v4-main/Cdy/menu.zip" 2>/dev/null | while IFS= read -r f; do
+      case "$f" in
+        */) continue ;;
+        *) rm -f "/usr/bin/$(basename "$f")" ;;
+      esac
+    done
+  fi
+  rm -f /usr/bin/menu /usr/bin/ipsave /usr/bin/cek-izin /var/log/izin.log
+  rm -rf /tmp/menu-baru
+  rm -rf /root/bot-js /root/vpn-api.py /etc/vpn-api /usr/local/bin/xray /etc/xray /tmp/xray.zip /tmp/xray-bin
+}
+
+# Siapkan install total: backup dulu, ambil source baru (gagal = batal,
+# instalasi lama TIDAK dihapus), ganti source lama, lalu hapus total.
+siapkan_install_total() {
+  local stamp backup tmp_src
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  backup="/root/darren-reinstall-backup-$stamp"
+  echo "Install total: membackup instalasi lama ke $backup ..."
+  mkdir -p "$backup"
+  [ -d /root/bot-js ] && cp -a /root/bot-js "$backup/" 2>/dev/null || true
+  [ -d /etc/vpn-api ] && cp -a /etc/vpn-api "$backup/" 2>/dev/null || true
+  [ -d /etc/xray ] && cp -a /etc/xray "$backup/" 2>/dev/null || true
+  echo "Mengambil source baru ..."
+  tmp_src="/tmp/darren-fresh-$$"
+  rm -rf "$tmp_src"
+  git clone --depth 1 "$REPO_URL" "$tmp_src" || { echo "Gagal clone source baru, install total dibatalkan (instalasi lama TIDAK dihapus)." >&2; exit 1; }
+  if [ ! -f "$tmp_src/v4-main/bot-js/app.js" ]; then
+    echo "Source baru tidak lengkap, install total dibatalkan." >&2
+    rm -rf "$tmp_src"
+    exit 1
+  fi
+  rm -rf "$SRC_DIR"
+  mv "$tmp_src" "$SRC_DIR"
+  echo "Menghapus total instalasi SC lama ..."
+  hapus_instalasi_lama
+  echo "Instalasi lama sudah dihapus total (backup di $backup)."
+}
 
 echo "=== v4-main fixed installer ==="
 echo "Mode ini menginstal bot-js + VPN API. BotVPN2 lama TIDAK diinstal"
@@ -65,6 +147,17 @@ else
   echo "Meng-clone repo Darren..."
   rm -rf "$SRC_DIR"
   git clone --depth 1 "$REPO_URL" "$SRC_DIR"
+fi
+# ---------- 3b. Install total ----------
+if [ "$TOTAL" = 1 ]; then
+  siapkan_install_total
+elif [ -d "$BOT_DIR" ] || [ -f /usr/bin/menu ]; then
+  read -r -p "Instalasi lama ditemukan. Hapus total dulu (backup + hapus semua)? [y/N] " hapus_total || true
+  if [ "$hapus_total" = "y" ] || [ "$hapus_total" = "Y" ]; then
+    siapkan_install_total
+  else
+    echo "Lanjut install biasa (instalasi lama dipertahankan)."
+  fi
 fi
 if [ ! -f "$SRC_DIR/v4-main/bot-js/app.js" ]; then
   echo "Source bot-js tidak ditemukan di $SRC_DIR/v4-main" >&2
