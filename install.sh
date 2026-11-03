@@ -71,13 +71,25 @@ fi
 if [ -z "${GH_TOKEN:-}" ]; then
   read -r -s -p "Token GitHub baca repo Darren (dari HP owner; kosongkan bila repo masih publik): " GH_TOKEN || true
   echo ""
+  TOKEN_SOURCE="prompt"
+else
+  TOKEN_SOURCE="environment"
 fi
 git_clone_darren() {
   local dest="$1"
   if [ -n "${GH_TOKEN:-}" ]; then
-    git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" clone --depth 1 "$REPO_URL" "$dest"
+    # P0 2026-11-03: pra-validasi token + gagal cepat. Tanpa
+    # GIT_TERMINAL_PROMPT=0, token buruk -> 401 -> git jatuh ke prompt
+    # username interaktif (itulah kegagalan rebuild server2).
+    echo "Memvalidasi token GitHub (sumber: $TOKEN_SOURCE; nilai tidak pernah ditampilkan)..."
+    if ! GIT_TERMINAL_PROMPT=0 git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" ls-remote "$REPO_URL" >/dev/null 2>&1; then
+      echo "ERROR: Token GitHub ditolak (401/403) atau repo tidak terjangkau." >&2
+      echo "Periksa: token read-only khusus repo Darren, belum kedaluwarsa, dan repo masih ada. Lalu jalankan ulang." >&2
+      exit 1
+    fi
+    GIT_TERMINAL_PROMPT=0 git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" clone --depth 1 "$REPO_URL" "$dest"
   else
-    git clone --depth 1 "$REPO_URL" "$dest"
+    GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$REPO_URL" "$dest" || { echo "ERROR: Clone repo gagal. Bila repo sudah private, jalankan ulang dengan token GitHub (prompt/env GH_TOKEN)." >&2; exit 1; }
   fi
 }
 
@@ -165,8 +177,18 @@ npm install -g pm2
 # ---------- 3. Ambil source ----------
 if [ -f "./v4-main/bot-js/app.js" ]; then
   echo "Memakai source lokal di $(pwd)/v4-main"
-  rm -rf "$SRC_DIR"
-  cp -a ./v4-main "$SRC_DIR"
+  # P0 2026-11-03: JANGAN rm -rf "$SRC_DIR" lalu cp dari ./v4-main bila
+  # posisi jalan SUDAH di dalam SRC_DIR — itu menghapus sumbernya sendiri
+  # (kegagalan rebuild server2). Bila sudah di dalam, tidak ada yang disalin.
+  # Bila dari direktori lain, salin ke level $SRC_DIR/v4-main yang benar
+  # (cek baris 188 mengharapkan $SRC_DIR/v4-main/bot-js/app.js).
+  if [ "$(readlink -f .)" = "$(readlink -f "$SRC_DIR")" ]; then
+    echo "Sudah di dalam $SRC_DIR, penyalinan dilewati."
+  else
+    mkdir -p "$SRC_DIR"
+    rm -rf "$SRC_DIR/v4-main"
+    cp -a ./v4-main "$SRC_DIR/v4-main"
+  fi
 elif [ -d "$SRC_DIR/v4-main/bot-js" ]; then
   echo "Memakai source yang sudah ada di $SRC_DIR"
 else
