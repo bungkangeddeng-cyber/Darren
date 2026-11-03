@@ -5,13 +5,17 @@
 # Uninstaller pasangannya: uninstall.sh (repo yang sama).
 #
 # Cara pakai di VPS baru (sebagai root):
-#   curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
+#   curl -fsSL -H "Authorization: Bearer ISI_TOKEN_DARI_HP" https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
 #   chmod +x install.sh
 #   ./install.sh
 #   ./install.sh --total   # install total: backup + hapus instalasi lama, lalu install baru
+# Token baca dibuat dari HP owner (GitHub -> token read-only khusus repo Darren,
+# masa berlaku pendek). Token yang sama dipakai di perintah unduh dan saat
+# installer meminta (atau lewat env GH_TOKEN). Repo Darren private: tanpa
+# token, unduhan dan clone gagal (404).
 #
-# Script ini TIDAK berisi secret apapun. Token bot dan ID admin diminta
-# lewat prompt saat instalasi, auth API dibuat acak, dan file .env
+# Script ini TIDAK berisi secret apapun. Token GitHub, token bot, dan ID admin
+# diminta lewat prompt saat instalasi, auth API dibuat acak, dan file .env
 # dibuat dengan permission 600. Jangan pernah menempel token di log/chat.
 set -euo pipefail
 
@@ -36,6 +40,9 @@ for arg in "$@"; do
       echo "            baru install baru (token bot + admin diminta ulang)."
       echo "  Tanpa --total, bila instalasi lama ditemukan installer akan bertanya"
       echo "  dulu sebelum menghapus total."
+      echo "  Token GitHub: set GH_TOKEN=... atau isi prompt (token baca repo,"
+      echo "            read-only, dari HP owner). Wajib bila repo sudah private,"
+      echo "            kosongkan bila repo masih publik."
       exit 0
       ;;
     *) echo "Argumen tidak dikenal: $arg (pakai --help)" >&2; exit 1 ;;
@@ -54,6 +61,25 @@ if [ "$TOTAL" = 1 ]; then
       ;;
   esac
 fi
+
+# ---------- Token GitHub ----------
+# Repo Darren private: clone butuh token baca (read-only, khusus repo Darren).
+# Token bisa lewat env GH_TOKEN (tidak ditanya lagi) atau prompt tersembunyi
+# (tidak tampil saat diketik). Kosongkan bila repo masih publik.
+# Token TIDAK disimpan di file mana pun dan TIDAK dibiarkan di config git:
+# clone memakai header sekali pakai (http.extraHeader), bukan URL bertoken.
+if [ -z "${GH_TOKEN:-}" ]; then
+  read -r -s -p "Token GitHub baca repo Darren (dari HP owner; kosongkan bila repo masih publik): " GH_TOKEN || true
+  echo ""
+fi
+git_clone_darren() {
+  local dest="$1"
+  if [ -n "${GH_TOKEN:-}" ]; then
+    git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" clone --depth 1 "$REPO_URL" "$dest"
+  else
+    git clone --depth 1 "$REPO_URL" "$dest"
+  fi
+}
 
 # Hapus total instalasi SC lama (dipakai mode --total / jawaban y).
 # TIDAK menghapus: node/npm/pm2, backup yang baru dibuat, dan SRC_DIR
@@ -93,7 +119,7 @@ siapkan_install_total() {
   echo "Mengambil source baru ..."
   tmp_src="/tmp/darren-fresh-$$"
   rm -rf "$tmp_src"
-  git clone --depth 1 "$REPO_URL" "$tmp_src" || { echo "Gagal clone source baru, install total dibatalkan (instalasi lama TIDAK dihapus)." >&2; exit 1; }
+  git_clone_darren "$tmp_src" || { echo "Gagal clone source baru, install total dibatalkan (instalasi lama TIDAK dihapus)." >&2; exit 1; }
   if [ ! -f "$tmp_src/v4-main/bot-js/app.js" ]; then
     echo "Source baru tidak lengkap, install total dibatalkan." >&2
     rm -rf "$tmp_src"
@@ -146,7 +172,7 @@ elif [ -d "$SRC_DIR/v4-main/bot-js" ]; then
 else
   echo "Meng-clone repo Darren..."
   rm -rf "$SRC_DIR"
-  git clone --depth 1 "$REPO_URL" "$SRC_DIR"
+  git_clone_darren "$SRC_DIR"
 fi
 # ---------- 3b. Install total ----------
 if [ "$TOTAL" = 1 ]; then
@@ -337,6 +363,22 @@ else
   echo "PERINGATAN: $MENU_ZIP tidak ditemukan, menu dilewati." >&2
 fi
 
+# Token baca izin untuk menu (cek-izin): dipakai membaca allowlist dari repo
+# private. Disimpan terkunci (600) di /etc/xray/izin-token, hanya root yang baca.
+# Bisa lewat env IZIN_TOKEN atau prompt tersembunyi. Kosongkan bila repo masih
+# publik (cek-izin tetap jalan tanpa token); wajib setelah repo private.
+if [ -z "${IZIN_TOKEN:-}" ]; then
+  read -r -s -p "Token baca izin menu (dari HP owner; kosongkan bila repo masih publik): " IZIN_TOKEN || true
+  echo ""
+fi
+if [ -n "${IZIN_TOKEN:-}" ]; then
+  mkdir -p /etc/xray
+  printf '%s' "$IZIN_TOKEN" > /etc/xray/izin-token
+  chmod 600 /etc/xray/izin-token
+  echo "Token baca izin tersimpan di /etc/xray/izin-token (600)."
+fi
+unset IZIN_TOKEN
+
 # ---------- 11. Verifikasi ----------
 echo ""
 echo "=== Verifikasi ==="
@@ -352,3 +394,5 @@ echo " - Port API 5890 hanya bind localhost. Jangan dibuka ke publik."
 echo " - Bila ini migrasi dari script lama, generate PKI OpenVPN baru."
 echo "   Kunci privat lama yang pernah publik harus dianggap bocor."
 echo " - Uji dulu dengan trial di bot sebelum jualan."
+# Bersihkan token dari shell (tidak disimpan di file mana pun).
+unset GH_TOKEN
