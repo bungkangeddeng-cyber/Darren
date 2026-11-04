@@ -1,11 +1,12 @@
 // ============================================================
 // Modul Sewa Script VPN — paket, bayar QRIS, aktivasi lisensi
-// Alur: pilih paket -> bayar QRIS (P2P gateway) -> input username+IP
-//        -> order pending -> fulfillment cron aktivasi lisensi
+// Alur: pilih paket -> bayar QRIS (gateway H2H milik sendiri) ->
+//        input username+IP -> order pending -> fulfillment cron
+//        aktivasi lisensi
 // ============================================================
 const crypto = require('crypto');
-const axios = require('axios');
 const config = require('../src/config');
+const h2h = require('../src/h2h');
 const digi = require('../src/digiflazz');
 const { run, get, all } = require('../src/db');
 
@@ -38,57 +39,45 @@ async function initTable() {
 async function createSewaOrder(telegramId, username, ip, days) {
   const pkg = PACKAGES.find((p) => p.days === days);
   if (!pkg) return { success: false, message: '❌ Paket tidak valid.' };
-  const { gatewayUrl, apiKey } = config.p2p;
+  const { apiKey } = config.h2h;
   if (!apiKey) return { success: false, message: '❌ Gateway QRIS belum dikonfigurasi.' };
 
   const ref = refId('SEWA');
-  const { data } = await axios.post(
-    `${gatewayUrl}/api/payments`,
-    { amount: pkg.price, reference: ref },
-    { headers: { 'X-API-Key': apiKey }, timeout: 20000 }
-  ).catch(() => ({ data: {} }));
-
-  if (!data?.id) return { success: false, message: '❌ Gagal membuat QRIS. Coba lagi.' };
+  const r = await h2h.createQris(pkg.price, ref);
+  if (!r.success) return { success: false, message: r.message };
 
   await run(
     `INSERT INTO sewa_orders (telegram_id, username, ip, days, amount, payment_ref, payment_id, status)
      VALUES (?,?,?,?,?,?,?,?)`,
-    [telegramId, username, ip, days, pkg.price, ref, data.id, 'pending']
+    [telegramId, username, ip, days, pkg.price, ref, r.qrisId, 'pending']
   );
 
-  // qrImage dari gateway sudah tenant-aware: /api/qr/<tenantId>/<id>.png.
-  // Jangan membangun URL QR tanpa tenantId (itu 404 untuk payment tenant).
-  const qrUrl = data.qrImage ? `${gatewayUrl}${data.qrImage}` : null;
-  let qrBuffer = null;
-  if (qrUrl) {
-    try {
-      const qrRes = await axios.get(qrUrl, {
-        responseType: 'arraybuffer', timeout: 20000,
-        headers: { 'X-API-Key': apiKey },
-      });
-      qrBuffer = Buffer.from(qrRes.data);
-    } catch (e) {}
-  }
-
   return {
-    success: true, ref, paymentId: data.id,
-    amount: pkg.price, uniqueAmount: data.uniqueAmount,
-    days, username, ip, qrBuffer, qrUrl,
+    success: true, ref, paymentId: r.qrisId,
+    amount: pkg.price, uniqueAmount: r.uniqueAmount,
+    days, username, ip, qrBuffer: r.qrBuffer, qrUrl: r.qrUrl,
   };
 }
 
-// ---------- Cek status pembayaran di gateway ----------
+// ---------- Cek status pembayaran sewa di gateway H2H ----------
+// Kembalikan { status, paidAmount }; status 'unknown' bila gateway tak
+// menjawab (pemanggil harus melewati putaran ini, bukan mengubah status).
 async function checkSewaPayment(paymentId) {
-  const { gatewayUrl, apiKey } = config.p2p;
-  const { data } = await axios.get(
-    `${gatewayUrl}/api/payments/${paymentId}`,
-    { headers: { 'X-API-Key': apiKey }, timeout: 15000 }
-  ).catch(() => ({ data: {} }));
-  return (data?.status || 'unknown').toLowerCase();
+  const r = await h2h.getQrisStatus(paymentId);
+  if (!r.ok) return { status: 'unknown', paidAmount: null };
+  return { status: r.status, paidAmount: r.paidAmount };
 }
 
+// Klaim atomik: hanya order yang masih 'pending' yang berpindah ke 'paid'.
+// Kembalikan jumlah baris berubah (0 = sudah diproses putaran lain).
 async function markSewaPaid(ref) {
-  await run(`UPDATE sewa_orders SET status = 'paid' WHERE payment_ref = ?`, [ref]);
+  const r = await run(`UPDATE sewa_orders SET status = 'paid' WHERE payment_ref = ? AND status = 'pending'`, [ref]);
+  return r.changes || 0;
+}
+
+async function markSewaExpired(ref) {
+  const r = await run(`UPDATE sewa_orders SET status = 'expired' WHERE payment_ref = ? AND status = 'pending'`, [ref]);
+  return r.changes || 0;
 }
 
 async function markSewaFulfilled(ref, expiry) {
@@ -126,6 +115,6 @@ function packageListText() {
 
 module.exports = {
   PACKAGES, initTable, createSewaOrder, checkSewaPayment,
-  markSewaPaid, markSewaFulfilled, getSewaOrder,
+  markSewaPaid, markSewaExpired, markSewaFulfilled, getSewaOrder,
   mySewaOrders, pendingSewaOrders, validUsername, validIp, packageListText,
 };

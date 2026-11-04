@@ -241,7 +241,9 @@ while true; do
   if [[ "$ADMIN_ID" =~ ^[0-9]+$ ]]; then break; fi
   echo "ADMIN_ID harus angka."
 done
-read -r -p "P2P Gateway URL (opsional, kosong = deposit GoPay nonaktif): " P2P_URL || true
+read -r -p "H2H Gateway URL (kosong = pakai https://payment-gateway.outletku.ai.id/api/h2h/v1): " H2H_URL || true
+read -r -s -p "H2H API key operator (kunci gk_ tenant operator; kosong = deposit H2H nonaktif, tidak akan tampil): " H2H_KEY || true
+echo ""
 read -r -p "Digiflazz username (opsional): " DIGI_USER || true
 if [ -n "$DIGI_USER" ]; then
   read -r -s -p "Digiflazz API key (opsional, tidak akan tampil): " DIGI_KEY || true
@@ -263,6 +265,7 @@ if [ -f "$BOT_DIR/.env" ]; then
   read -r -p ".env sudah ada. Timpa dengan konfigurasi baru? [y/N] " overwrite || true
   if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
     echo "Memakai .env lama. Pastikan VPN_API_AUTH di .env sama dengan auth API di bawah."
+    grep -q 'H2H_API_KEY=gk_' "$BOT_DIR/.env" 2>/dev/null || echo "PERHATIAN: .env lama tidak berisi H2H_API_KEY — deposit H2H nonaktif sampai kunci gk_ operator ditambahkan."
   else
     rm -f "$BOT_DIR/.env"
   fi
@@ -274,7 +277,8 @@ ADMIN_ID=$ADMIN_ID
 VPN_API_BASE=$VPN_API_BASE
 VPN_API_AUTH=$VPN_API_AUTH
 VPN_DOMAIN=$VPN_DOMAIN
-P2P_GATEWAY_URL=$P2P_URL
+H2H_BASE_URL=${H2H_URL:-https://payment-gateway.outletku.ai.id/api/h2h/v1}
+H2H_API_KEY=$H2H_KEY
 DIGIFLAZZ_USERNAME=$DIGI_USER
 DIGIFLAZZ_API_KEY=$DIGI_KEY
 EOF

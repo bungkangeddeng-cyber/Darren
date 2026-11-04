@@ -73,7 +73,7 @@ pm2 startup
    kredensial CF di server masing-masing)
 5. **Digiflazz** — `DIGIFLAZZ_USERNAME` + `DIGIFLAZZ_API_KEY` (untuk PPOB;
    akun Digiflazz Aji (isi sesuai akun Aji))
-6. **P2P Gateway** — `P2P_API_KEY` (untuk deposit QRIS via p2p.shifastore.my.id)
+6. **H2H Gateway** — `H2H_API_KEY` (kunci tenant gk_ operator; untuk deposit QRIS via gateway GoPay milik sendiri)
 7. **Sidompul** — `SIDOMPUL_API_KEY` (untuk cek kuota)
 
 ## Perintah user

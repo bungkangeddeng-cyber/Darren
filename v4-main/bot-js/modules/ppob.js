@@ -2,9 +2,8 @@
 // Modul PPOB — saldo, deposit QRIS, beli pulsa/paket via Digiflazz
 // ============================================================
 const crypto = require('crypto');
-const axios = require('axios');
-const QRCode = require('qrcode');
 const config = require('../src/config');
+const h2h = require('../src/h2h');
 const digi = require('../src/digiflazz');
 const { esc } = require('../src/format');
 const { run, get, all, products: dbProducts } = require('../src/db');
@@ -116,61 +115,50 @@ async function deductSaldo(telegramId, amount) {
   return { success: true, saldo: await getSaldo(telegramId) };
 }
 
-// ---------- Deposit via QRIS P2P Gateway ----------
-// Cache qrUrl per paymentId (memori proses) agar deposit pending yang dipakai
-// ulang (<30 menit) tetap dapat URL QR tenant-aware tanpa membuat payment baru.
-// QR gateway bersifat tenant-aware: /api/qr/<tenantId>/<id>.png — URL tanpa
-// tenantId jatuh ke master dan 404 untuk payment tenant lain. Jangan pernah
-// membangun URL QR tanpa tenantId.
-const qrUrlCache = new Map();
+// ---------- Deposit via QRIS H2H Gateway (milik sendiri) ----------
+// QRIS H2H berlaku 5 menit. Cache QR per paymentId (memori proses, dipangkas
+// tiap panggilan bila >10 menit) agar deposit pending yang dipakai ulang
+// (<5 menit) tetap dapat QR yang sama tanpa membuat payment baru.
+const qrCache = new Map();
+
+function pruneQrCache() {
+  const now = Date.now();
+  for (const [k, v] of qrCache) {
+    if (now - v.ts > 10 * 60 * 1000) qrCache.delete(k);
+  }
+}
 
 async function createDeposit(telegramId, amount) {
-  const { gatewayUrl, apiKey } = config.p2p;
+  const { apiKey } = config.h2h;
   if (!apiKey) return { success: false, message: '❌ Gateway QRIS belum dikonfigurasi.' };
-  // Idempoten: pakai ulang deposit pending <30 menit (anti QR ganda saat retry/timeout)
+  pruneQrCache();
+  // Idempoten: pakai ulang deposit H2H pending <5 menit (masa berlaku QRIS H2H).
+  // Baris gateway lama (P2P, 'gopay') TIDAK dipakai ulang — gateway sudah ganti.
   const existing = await get(
     `SELECT ref_id, payment_id, amount FROM transactions
      WHERE telegram_id = ? AND type = 'deposit' AND status = 'pending'
-       AND payment_id != '' AND (gateway IS NULL OR gateway = 'gopay')
-       AND created_at > datetime('now','-30 minutes')
+       AND payment_id != '' AND gateway = 'h2h'
+       AND created_at > datetime('now','-5 minutes')
      ORDER BY id DESC LIMIT 1`,
     [telegramId]).catch(() => null);
-  let ref, paymentId, qrUrl = null;
+  let ref, paymentId, qrUrl = null, qrBuffer = null;
   if (existing) {
     // FIXED: never silently reuse a pending deposit of a different amount.
     if (Number(existing.amount) !== Number(amount)) {
-      return { success: false, message: `❌ Masih ada deposit pending sebesar ${existing.amount}. Selesaikan dulu atau tunggu deposit itu kedaluwarsa.` };
+      return { success: false, message: `❌ Masih ada deposit pending sebesar ${existing.amount}. Selesaikan dulu atau tunggu deposit itu kedaluwarsa (QRIS H2H berlaku 5 menit).` };
     }
     ref = existing.ref_id; paymentId = existing.payment_id; amount = existing.amount;
-    qrUrl = qrUrlCache.get(paymentId) || null;
+    const cached = qrCache.get(paymentId);
+    if (cached) { qrUrl = cached.qrUrl; qrBuffer = cached.qrBuffer; }
   } else {
     ref = refId('DEP');
-    const { data } = await axios.post(
-      `${gatewayUrl}/api/payments`,
-      { amount, reference: ref },
-      { headers: { 'X-API-Key': apiKey }, timeout: 20000 }
-    ).catch(() => ({ data: {} }));
-    if (!data?.id) {
-      return { success: false, message: '❌ Gagal membuat QRIS deposit.' };
-    }
-    paymentId = data.id;
-    // qrImage dari gateway sudah tenant-aware: /api/qr/<tenantId>/<id>.png
-    if (data.qrImage) {
-      qrUrl = gatewayUrl + data.qrImage;
-      qrUrlCache.set(paymentId, qrUrl);
-    }
-    await run("INSERT INTO transactions (telegram_id, type, amount, ref_id, payment_id, status, gateway) VALUES (?,?,?,?,?,?,'gopay')",
+    const r = await h2h.createQris(amount, ref);
+    if (!r.success) return { success: false, message: r.message };
+    paymentId = r.qrisId;
+    qrBuffer = r.qrBuffer; qrUrl = r.qrUrl;
+    qrCache.set(paymentId, { qrUrl, qrBuffer, ts: Date.now() });
+    await run("INSERT INTO transactions (telegram_id, type, amount, ref_id, payment_id, status, gateway) VALUES (?,?,?,?,?,?,'h2h')",
       [telegramId, 'deposit', amount, ref, paymentId, 'pending']);
-  }
-  // qrUrl hanya dari qrImage gateway (tenant-aware) atau cache reuse; bila tidak
-  // ada, jangan fallback ke URL tanpa tenant (itu 404 untuk payment tenant).
-  let qrBuffer = null;
-  if (qrUrl) {
-    try {
-      const qrRes = await axios.get(qrUrl, { responseType: 'arraybuffer', timeout: 20000,
-        headers: { 'X-API-Key': apiKey } });
-      qrBuffer = Buffer.from(qrRes.data);
-    } catch (e) {}
   }
   return { success: true, ref, amount, paymentId, qrBuffer, qrUrl };
 }

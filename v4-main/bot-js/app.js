@@ -21,6 +21,7 @@ const GROUP_NOTIF = ''; // ID grup notifikasi diatur via panel admin; kosong = n
 const { init: initDb } = require('./src/db');
 const vpn = require('./modules/vpn');
 const ppob = require('./modules/ppob');
+const h2h = require('./src/h2h');
 const kuota = require('./modules/kuota');
 const admin = require('./modules/admin');
 const cleanup = require('./modules/cleanup');
@@ -1259,7 +1260,7 @@ bot.on('text', async (ctx) => {
     await ctx.reply('⏳ Membuat QRIS...');
     const r = await ppob.createDeposit(ctx.from.id, nominal);
     if (!r.success) return ctx.reply(r.message);
-    const caption = `💳 <b>Deposit ${digi.rp(nominal)}</b>\nRef: <code>${r.ref}</code>\n\nScan QRIS di atas untuk bayar. Saldo masuk otomatis setelah pembayaran terdeteksi.`;
+    const caption = `💳 <b>Deposit ${digi.rp(nominal)}</b>\nRef: <code>${r.ref}</code>\n\nScan QRIS di atas untuk bayar. Saldo masuk otomatis setelah pembayaran terdeteksi.\n⏰ QRIS berlaku 5 menit.`;
     if (r.qrBuffer) return ctx.replyWithPhoto({ source: r.qrBuffer }, { caption, parse_mode: 'HTML' });
     return ctx.reply(caption + `\n${r.qrUrl || ''}`, { parse_mode: 'HTML' });
   }
@@ -1484,12 +1485,21 @@ bot.action(/^sewa_cek_(.+)$/, async (ctx) => {
     );
   };
   if (order.status === 'paid') return doRegister();
-  const st = await sewa.checkSewaPayment(order.payment_id).catch(() => 'unknown');
-  if (st === 'paid' || st === 'success' || st === 'settled') {
+  const st = await sewa.checkSewaPayment(order.payment_id).catch(() => ({ status: 'unknown', paidAmount: null }));
+  if (h2h.isPaidStatus(st.status)) {
+    // Verifikasi nominal (BARU di rombak H2H): tombol cek manual juga tidak
+    // boleh mengaktifkan order bila nominal gateway tidak cocok.
+    if (st.paidAmount != null && Math.abs(Number(st.paidAmount) - Number(order.amount)) > 1000) {
+      return ctx.reply(`❌ Nominal pembayaran tidak cocok (tercatat <b>${digi.rp(order.amount)}</b>). Hubungi admin.`, { parse_mode: 'HTML' });
+    }
     await sewa.markSewaPaid(ref);
     return doRegister();
   }
-  await ctx.reply(`⏳ Belum ada pembayaran terdeteksi (status: <code>${esc(st)}</code>).\nScan QRIS dulu, lalu tekan tombol cek lagi.`, { parse_mode: 'HTML' });
+  if (h2h.isExpiredStatus(st.status)) {
+    await sewa.markSewaExpired(ref).catch(() => {});
+    return ctx.reply('❌ QRIS sudah kedaluwarsa. Buat order sewa baru.', { parse_mode: 'HTML' });
+  }
+  await ctx.reply(`⏳ Belum ada pembayaran terdeteksi (status: <code>${esc(st.status)}</code>).\nScan QRIS dulu, lalu tekan tombol cek lagi.`, { parse_mode: 'HTML' });
 });
 
 // ---------- Admin: daftar sewa ----------
@@ -1881,7 +1891,7 @@ bot.action('dep_method_gopay', async (ctx) => {
   await ctx.reply('⏳ Membuat QRIS...');
   const r = await ppob.createDeposit(ctx.from.id, nominal);
   if (!r.success) return ctx.reply(r.message);
-  const caption = `💳 <b>Deposit ${digi.rp(nominal)}</b>\nRef: <code>${r.ref}</code>\n\nScan QRIS di atas untuk bayar. Saldo masuk otomatis setelah pembayaran terdeteksi.`;
+  const caption = `💳 <b>Deposit ${digi.rp(nominal)}</b>\nRef: <code>${r.ref}</code>\n\nScan QRIS di atas untuk bayar. Saldo masuk otomatis setelah pembayaran terdeteksi.\n⏰ QRIS berlaku 5 menit.`;
   if (r.qrBuffer) return ctx.replyWithPhoto({ source: r.qrBuffer }, { caption, parse_mode: 'HTML' });
   return ctx.reply(caption + `\n${r.qrUrl || ''}`, { parse_mode: 'HTML' });
 });
@@ -3152,7 +3162,10 @@ sweepTrialsOnce();
 // ---------- Poller deposit QRIS: kredit saldo otomatis tiap 30 detik ----------
 // Deposit yang sudah dibayar di gateway (status paid/success/settled/completed)
 // dikreditkan ke saldo user. Klaim atomik: hanya transaksi yang masih 'pending'
-// yang diproses. Mendukung 2 gateway: gopay (P2P sendiri) & pakasir.
+// yang diproses. Mendukung 2 gateway: h2h (GoPay H2H milik sendiri) & pakasir.
+// Baris deposit gateway lama (P2P, gateway='gopay') TIDAK lagi dipoller sejak
+// rombak H2H — baris itu menggantung sampai jendela 7 hari habis; selesaikan
+// manual bila masih ada saat deploy.
 setInterval(async () => {
   try {
     const { all, run } = require('./src/db');
@@ -3162,8 +3175,6 @@ setInterval(async () => {
          AND created_at > datetime('now','-7 days')`
     ).catch(() => []);
     if (!pending.length) return;
-    const { gatewayUrl, apiKey } = config.p2p;
-    const axios = require('axios');
     const pakasirReady = await pakasir.isReady().catch(() => false);
     for (const tx of pending) {
       try {
@@ -3186,23 +3197,25 @@ setInterval(async () => {
               [s.status, tx.ref_id]);
             continue;
           } else continue; // masih pending
-        } else {
-          if (!apiKey) continue;
-          const { data } = await axios.get(
-            `${gatewayUrl}/api/payments/${encodeURIComponent(tx.payment_id)}`,
-            { headers: { 'X-API-Key': apiKey }, timeout: 15000 }
-          ).catch(() => ({ data: {} }));
-          const st = String(data?.status || '').toLowerCase();
-          if (!['paid', 'success', 'settled'].includes(st)) continue;
-          // FIXED: verify paid amount when the gateway reports one.
-          // Unique-code differences are small (<=1000); larger gaps are
-          // skipped, not credited, so partial/wrong payments are flagged.
-          const paidAmt = data?.amount ?? data?.totalAmount ?? data?.uniqueAmount ?? data?.paidAmount ?? null;
-          if (paidAmt != null && Math.abs(Number(paidAmt) - Number(tx.amount)) > 1000) {
-            console.error('[deposit] nominal tidak cocok, tidak dikreditkan:', tx.ref_id, 'db=', tx.amount, 'gateway=', paidAmt);
+        } else if (gw === 'h2h') {
+          const st = await h2h.getQrisStatus(tx.payment_id).catch(() => ({ ok: false }));
+          if (!st.ok) continue; // gateway tak menjawab; coba putaran berikutnya
+          if (h2h.isPaidStatus(st.status)) {
+            // Verifikasi nominal (dipertahankan dari jalur lama): selisih kode
+            // unik kecil (<=1000) ditoleransi; selisih lebih besar = jangan kredit.
+            if (st.paidAmount != null && Math.abs(Number(st.paidAmount) - Number(tx.amount)) > 1000) {
+              console.error('[deposit] nominal H2H tidak cocok, tidak dikreditkan:', tx.ref_id, 'db=', tx.amount, 'gateway=', st.paidAmount);
+              continue;
+            }
+            isPaid = true;
+          } else if (h2h.isExpiredStatus(st.status)) {
+            // QRIS H2H berlaku 5 menit — tandai expired, jangan dipoller selamanya.
+            await run(`UPDATE transactions SET status = 'expired' WHERE ref_id = ? AND status = 'pending'`,
+              [tx.ref_id]);
             continue;
-          }
-          isPaid = true;
+          } else continue; // masih pending / status tak dikenal = belum lunas
+        } else {
+          continue; // gateway lama (P2P) — tidak lagi dipoller sejak rombak H2H
         }
         if (!isPaid) continue;
         const r = await run(
@@ -3259,13 +3272,25 @@ setInterval(async () => {
   try {
     const { all } = require('./src/db');
     const pending = await all(
-      `SELECT payment_ref, payment_id FROM sewa_orders WHERE status = 'pending' AND created_at > datetime('now','-7 days')`
+      `SELECT payment_ref, payment_id, amount FROM sewa_orders WHERE status = 'pending' AND created_at > datetime('now','-7 days')`
     ).catch(() => []);
     for (const o of pending) {
       try {
-        const st = await sewa.checkSewaPayment(o.payment_id).catch(() => 'unknown');
-        if (!['paid', 'success', 'settled'].includes(st)) continue;
-        await sewa.markSewaPaid(o.payment_ref);
+        const st = await sewa.checkSewaPayment(o.payment_id).catch(() => ({ status: 'unknown', paidAmount: null }));
+        if (h2h.isExpiredStatus(st.status)) {
+          // QRIS H2H berlaku 5 menit — tandai expired, jangan dipoller selamanya.
+          await sewa.markSewaExpired(o.payment_ref).catch(() => {});
+          continue;
+        }
+        if (!h2h.isPaidStatus(st.status)) continue; // masih pending / tak dikenal = belum lunas
+        // Verifikasi nominal (BARU di rombak H2H — dulu sewa tanpa verifikasi
+        // nominal sama sekali): toleransi Rp1.000 menutup selisih kode unik.
+        if (st.paidAmount != null && Math.abs(Number(st.paidAmount) - Number(o.amount)) > 1000) {
+          console.error('[sewa] nominal tidak cocok, tidak diaktifkan:', o.payment_ref, 'db=', o.amount, 'gateway=', st.paidAmount);
+          continue;
+        }
+        const claimed = await sewa.markSewaPaid(o.payment_ref);
+        if (!claimed) continue; // sudah diproses putaran lain (klaim atomik)
         const order = await sewa.getSewaOrder(o.payment_ref).catch(() => null);
         if (!order) continue;
         const reg = await ipregistry.registerIp(order.username, order.days, order.ip).catch(() => ({ success: false }));

@@ -40,9 +40,12 @@ module.exports = {
     margin: num(process.env.PPOB_MARGIN, 0),
   },
 
-  p2p: {
-    gatewayUrl: (process.env.P2P_GATEWAY_URL || '').replace(/\/$/, ''), // FIXED: must be set in .env
-    apiKey: process.env.P2P_API_KEY || '',
+  h2h: {
+    // Gateway H2H milik sendiri (deposit QRIS GoPay + sewa).
+    // apiKey = kunci tenant gk_ milik OPERATOR bot, dari env di server.
+    // JANGAN tulis nilai kunci di sini / di repo.
+    baseUrl: (process.env.H2H_BASE_URL || 'https://payment-gateway.outletku.ai.id/api/h2h/v1').replace(/\/$/, ''),
+    apiKey: process.env.H2H_API_KEY || '',
   },
 
   hcApiKey: process.env.HC_API_KEY || '',
@@ -60,7 +63,7 @@ module.exports = {
   groupId: '', // Grup Aji diatur via panel admin; kosong = tidak ada grup bawaan
   pageSize: 10,
   paymentPollMs: 5000,
-  qrisExpireMinutes: 30,
+  qrisExpireMinutes: 5, // QRIS H2H berlaku 5 menit (dipakai logika reuse deposit)
   requiredChannelId: '',
   requiredChannelUrl: '', // Channel Aji diatur via panel admin; kosong = tidak ada channel wajib bawaan,
   roles: ['bronze', 'silver', 'gold'],
