@@ -2525,7 +2525,8 @@ bot.action('adm_api_register', async (ctx) => {
   const secSt = st.find((f) => f.key === 'WEBHOOK_SECRET');
   if (!url) return ctx.reply('❌ Domain VPN belum diset. Input Domain VPN dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
   if (!keySt || !keySt.filled) return ctx.reply('❌ Kunci gateway belum diisi. Input Kunci Gateway dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
-  if (!secSt || !secSt.filled) return ctx.reply('❌ Secret webhook belum diisi. Input Secret Webhook dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  const runningSecret = config.webhook?.secret || '';
+  if ((!secSt || !secSt.filled) && !runningSecret) return ctx.reply('❌ Secret webhook belum diisi. Restart bot sekali (secret dibuat otomatis), lalu coba lagi.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
   try {
     const r = await h2h.registerWebhook(url);
     if (r.already) return ctx.reply(`✅ Webhook sudah terdaftar di gateway:\n<code>${esc(url)}</code>\n\n<i>Panel /webhook menampilkan webhook ini juga.</i>`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
@@ -3599,6 +3600,31 @@ bot.command('restoredb', async (ctx) => {
   sessions.set(ctx.chat.id, { step: 'restore_db' });
 });
 
+// Webhook otomatis saat boot (skrip sewa: tanpa input, tanpa tap tombol).
+// Bila domain + kunci gateway sudah ada: pastikan URL webhook bot terdaftar.
+// - Secret baru dibuat saat boot -> hapus pendaftaran lama (secret lama), daftar baru.
+// - Sudah terdaftar -> diam. Gagal (gateway down) -> log saja, poller tetap jalan.
+async function ensureWebhook() {
+  try {
+    const url = apiSettings.webhookUrl();
+    if (!url || !config.h2h?.apiKey) return;
+    const list = await h2h.listWebhooks();
+    const mine = list.filter((w) => w.url === url);
+    if (config.webhook?.generated && mine.length) {
+      for (const w of mine) { try { await h2h.deleteWebhook(w.id); } catch (_) {} }
+    } else if (mine.length) {
+      return;
+    }
+    const r = await h2h.registerWebhook(url);
+    console.log(`[webhook] auto-terdaftar: ${url} (already=${r.already})`);
+    if (!r.already && config.adminId) {
+      try { await bot.telegram.sendMessage(config.adminId, `✅ <b>Webhook deposit terdaftar otomatis.</b>\n<code>${esc(url)}</code>`, { parse_mode: 'HTML' }); } catch (_) {}
+    }
+  } catch (e) {
+    console.error('[webhook] auto-daftar gagal:', e?.message || '');
+  }
+}
+
 // Receiver webhook deposit (Fase 1) — loopback saja, belum diekspos publik.
 require('./src/webhook').start({
   bot, ppob, settings, digi, esc, notifGrup,
@@ -3607,6 +3633,7 @@ require('./src/webhook').start({
 });
 
 bot.launch();
+setTimeout(() => { ensureWebhook().catch(() => {}); }, 3000);
   console.log('🤖 Bot RIPZZ berjalan (@Notif2Ajibot)');
 })();
 

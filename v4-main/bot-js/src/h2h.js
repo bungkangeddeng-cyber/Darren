@@ -182,4 +182,14 @@ async function registerWebhook(url) {
   return { already: false };
 }
 
-module.exports = { createQris, getQrisStatus, isPaidStatus, isExpiredStatus, listWebhooks, registerWebhook };
+
+// Hapus satu webhook berdasarkan id (dipakai rotasi secret saat boot).
+async function deleteWebhook(id) {
+  const { baseUrl, apiKey } = creds();
+  if (!apiKey) throw new Error('Kunci gateway belum dikonfigurasi.');
+  await axios.delete(`${baseUrl}/gopay/webhooks/${encodeURIComponent(id)}`, {
+    headers: { 'x-api-key': apiKey }, timeout: 15000,
+  });
+}
+
+module.exports = { createQris, getQrisStatus, isPaidStatus, isExpiredStatus, listWebhooks, registerWebhook, deleteWebhook };

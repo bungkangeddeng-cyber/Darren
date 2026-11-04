@@ -5,6 +5,26 @@
 // ============================================================
 require('dotenv').config();
 
+// Secret webhook: bila belum ada, dibuat otomatis sekali (skrip sewa: tanpa
+// input). Disimpan ke .env (600) agar restart berikutnya memakai nilai sama.
+let webhookSecretGenerated = false;
+if (!process.env.WEBHOOK_SECRET) {
+  const gen = require('crypto').randomBytes(32).toString('hex');
+  process.env.WEBHOOK_SECRET = gen;
+  webhookSecretGenerated = true;
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const envPath = path.join(__dirname, '..', '.env');
+    let cur = '';
+    try { cur = fs.readFileSync(envPath, 'utf8'); } catch (_) {}
+    const sep = cur && !cur.endsWith('\n') ? '\n' : '';
+    fs.appendFileSync(envPath, sep + `WEBHOOK_SECRET=${gen}\n`);
+    try { fs.chmodSync(envPath, 0o600); } catch (_) {}
+  } catch (_) { /* simpan gagal: secret in-memory saja */ }
+}
+
+
 const num = (v, d) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
@@ -53,6 +73,7 @@ module.exports = {
     // secret = secret webhook akun gateway operator, dari env di server.
     // Tanpa secret, receiver menolak semua (503 fail-closed).
     secret: process.env.WEBHOOK_SECRET || '',
+    generated: webhookSecretGenerated, // true bila secret baru dibuat saat boot ini
     port: num(process.env.WEBHOOK_PORT, 8899),
   },
 
