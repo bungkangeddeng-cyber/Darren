@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261104-03
+# DARREN_INSTALLER_VERSION=fix-total-20261104-04
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
@@ -29,7 +29,7 @@ set -euo pipefail
 # script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # B15: penanda versi (grep DARREN_INSTALLER_VERSION).
-DARREN_INSTALLER_VERSION="fix-total-20261104-03"
+DARREN_INSTALLER_VERSION="fix-total-20261104-04"
 # B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
 # rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
 # ubah konstanta ini + README, lalu uji live ulang.
@@ -258,7 +258,14 @@ pasang_node_pm2() {
   if [ "$need_node" = "1" ]; then
     echo "Menginstal Node.js 20 dari repo apt resmi NodeSource (bukan pipe ke bash)..."
     mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    # Keyring NodeSource selamat dari uninstall (repo apt tidak dihapus) —
+    # bila sudah ada dan tidak kosong, pakai lagi tanpa gpg.
+    if [ ! -s /etc/apt/keyrings/nodesource.gpg ]; then
+      # --batch: gpg tidak boleh menyentuh tty. Tanpa ini, install
+      # non-interaktif (stdin pipe, tanpa terminal pengendali) mati
+      # 'gpg: cannot open /dev/tty' tepat di langkah ini.
+      curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg || { echo "ERROR: gagal mengunduh/mengolah kunci NodeSource — BERHENTI." >&2; exit 1; }
+    fi
     NODE_MAJOR=20
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
     apt-get update -y
@@ -830,6 +837,11 @@ fi
 # dan belum ada hap.pem yang valid. Gagal di sini = TLS pending, BUKAN gagal total.
 if [ -f /etc/haproxy/hap.pem ] && haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
   TLS_STATUS="ready"; TLS_REASON="hap.pem sudah ada + haproxy -c lolos"
+  # BUG: cabang ini dulu tidak pernah men-start haproxy (enable/start hanya
+  # ada di cabang LE baru) — hap.pem yang selamat dari uninstall membuat
+  # installer selalu lewat sini, lalu gate gagal "haproxy tidak aktif".
+  systemctl enable haproxy 2>/dev/null || true
+  systemctl restart haproxy 2>/dev/null || systemctl start haproxy 2>/dev/null || echo "PERINGATAN: haproxy gagal start — gate akan menandainya." >&2
 elif [ -n "${EFFECTIVE_DOMAIN:-}" ] && ! ss -ltn 2>/dev/null | grep -q ':80 '; then
   echo "Mencoba sertifikat LE untuk $EFFECTIVE_DOMAIN via acme.sh resmi (gagal = TLS pending, bukan gagal total)..."
   if [ ! -d "$HOME/.acme.sh" ]; then
