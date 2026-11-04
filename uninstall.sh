@@ -51,6 +51,10 @@ hapus_stack_darren() {
   systemctl disable --now vpn-api 2>/dev/null || true
   systemctl disable --now xray 2>/dev/null || true
   rm -f /etc/systemd/system/vpn-api.service /etc/systemd/system/xray.service
+  # FASE 1: hapus juga direktori drop-in Xray (backup dilakukan pemanggil:
+  # main() di bawah, atau siapkan_install_total() di install.sh) supaya
+  # unit lama yang menimpa ExecStart tidak selamat dari uninstall/--total.
+  rm -rf /etc/systemd/system/xray.service.d
   systemctl daemon-reload 2>/dev/null || true
 
   # 3. Menu (daftar file persis dari menu.zip bila ada; dibaca SEBELUM
@@ -120,13 +124,13 @@ main() {
   echo "Yang akan dihapus:"
   echo "  - bot ripzz-bot-js (pm2) + daemon PM2 + startup pm2-root + ~/.pm2"
   echo "  - PM2 global (npm uninstall -g pm2 + /usr/lib/node_modules/pm2)"
-  echo "  - service vpn-api + xray + file unitnya"
+  echo "  - service vpn-api + xray + file unitnya + direktori drop-in xray"
   echo "  - file /root/bot-js, /root/vpn-api.py, /etc/vpn-api, /usr/local/bin/xray,"
   echo "    /etc/xray, menu /usr/bin/menu + script menu, /usr/bin/ipsave,"
   echo "    /usr/bin/cek-izin, /var/log/izin.log, /root/darren-install"
   echo "  - Node.js + npm (paket apt nodejs + npm) dan vnstat (+ data /var/lib/vnstat)"
   echo "Backup disalin dulu ke /root/darren-uninstall-backup-<waktu>/"
-  echo "  (hanya /root/bot-js, /etc/vpn-api, /etc/xray)."
+  echo "  (hanya /root/bot-js, /etc/vpn-api, /etc/xray, dan direktori drop-in xray)."
   echo "CATATAN: backup TIDAK mengembalikan Node.js/PM2/vnstat yang terhapus."
   echo "  Restore = kembalikan file dari backup + install ulang (install.sh"
   echo "  akan memasang Node/PM2/vnstat lagi dari nol)."
@@ -143,7 +147,7 @@ main() {
 
   BAK="/root/darren-uninstall-backup-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$BAK"
-  for d in /root/bot-js /etc/vpn-api /etc/xray; do
+  for d in /root/bot-js /etc/vpn-api /etc/xray /etc/systemd/system/xray.service.d; do
     if [ -e "$d" ]; then cp -a "$d" "$BAK/" 2>/dev/null || echo "Backup $d gagal, lanjut."; fi
   done
   echo "Backup di: $BAK"

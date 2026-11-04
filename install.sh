@@ -130,6 +130,9 @@ siapkan_install_total() {
   [ -d /root/bot-js ] && cp -a /root/bot-js "$backup/" 2>/dev/null || true
   [ -d /etc/vpn-api ] && cp -a /etc/vpn-api "$backup/" 2>/dev/null || true
   [ -d /etc/xray ] && cp -a /etc/xray "$backup/" 2>/dev/null || true
+  # FASE 1: drop-in Xray ikut dibackup supaya penghapusannya di
+  # hapus_stack_darren tidak menghilangkan jejak unit efektif lama.
+  [ -d /etc/systemd/system/xray.service.d ] && cp -a /etc/systemd/system/xray.service.d "$backup/" 2>/dev/null || true
   echo "Mengambil source baru ..."
   tmp_src="/tmp/darren-fresh-$$"
   rm -rf "$tmp_src"
@@ -210,32 +213,10 @@ else
   rm -rf "$SRC_DIR"
   git_clone_darren "$SRC_DIR"
 fi
-# ---------- 3b. Install total ----------
-if [ "$TOTAL" = 1 ]; then
-  siapkan_install_total
-elif [ -d "$BOT_DIR" ] || [ -f /usr/bin/menu ]; then
-  read -r -p "Instalasi lama ditemukan. Hapus total dulu (backup + hapus semua)? [y/N] " hapus_total || true
-  if [ "$hapus_total" = "y" ] || [ "$hapus_total" = "Y" ]; then
-    siapkan_install_total
-  else
-    echo "Lanjut install biasa (instalasi lama dipertahankan)."
-  fi
-fi
-if [ ! -f "$SRC_DIR/v4-main/bot-js/app.js" ]; then
-  echo "Source bot-js tidak ditemukan di $SRC_DIR/v4-main" >&2
-  exit 1
-fi
-node --check "$SRC_DIR/v4-main/bot-js/app.js"
-python3 -m py_compile "$SRC_DIR/v4-main/Api/vpn-api.py"
-
-# ---------- 4. Backup instalasi lama (bila ada) ----------
-if [ -d "$BOT_DIR" ]; then
-  bak="/root/bot-js.bak-$(date +%Y%m%d-%H%M%S)"
-  echo "Backup bot lama ke $bak"
-  cp -a "$BOT_DIR" "$bak"
-fi
-
-# ---------- 5. Prompt konfigurasi (aman, tidak di-echo) ----------
+# ---------- 5. Prompt konfigurasi (DIPINDAH ke sini, FASE 1) ----------
+# Prompt-prompt ini DULU ada di langkah 5 (setelah penghapusan total),
+# sehingga batal/EOF di prompt meninggalkan VPS telanjang. Sekarang semua
+# ditanyakan SEBELUM penghapusan destruktif apa pun (langkah 3b).
 echo ""
 echo "Isi konfigurasi berikut. Kosongkan yang opsional bila belum ada."
 read -r -p "Domain VPS kamu (contoh: vpn.contoh.com, kosong = localhost saja): " VPN_DOMAIN || true
@@ -265,9 +246,52 @@ if [ -n "$DIGI_USER" ]; then
 else
   DIGI_KEY=""
 fi
+# Pilihan Xray juga ditanya di sini (dulu di langkah 9); langkah 9 hanya
+# memakai variabel ini, tidak bertanya lagi.
+read -r -p "Instal Xray? [Y/n, kosong = YA] " install_xray || true
 
 VPN_API_AUTH="$(openssl rand -hex 24)"
 VPN_API_BASE="http://127.0.0.1:5890"
+
+# ---------- 3b. Install total ----------
+if [ "$TOTAL" = 1 ]; then
+  # FASE 1: --total wajib konfirmasi ketik YA (gaya uninstall mandiri)
+  # SEBELUM siapkan_install_total berjalan; selain YA = batal total.
+  echo "PERINGATAN: --total akan membackup lalu MENGHAPUS TOTAL stack Darren lama (bot, API, Xray, menu, Node/PM2/vnstat)."
+  read -r -p "Ketik YA (huruf besar) untuk lanjut install total: " confirm_total || true
+  if [ "$confirm_total" != "YA" ]; then
+    echo "Dibatalkan. Instalasi lama TIDAK dihapus."
+    exit 0
+  fi
+  siapkan_install_total
+elif [ -d "$BOT_DIR" ] || [ -f /usr/bin/menu ]; then
+  read -r -p "Instalasi lama ditemukan. Hapus total dulu (backup + hapus semua)? [y/N] " hapus_total || true
+  if [ "$hapus_total" = "y" ] || [ "$hapus_total" = "Y" ]; then
+    siapkan_install_total
+  else
+    echo "Lanjut install biasa (instalasi lama dipertahankan)."
+  fi
+fi
+if [ ! -f "$SRC_DIR/v4-main/bot-js/app.js" ]; then
+  echo "Source bot-js tidak ditemukan di $SRC_DIR/v4-main" >&2
+  exit 1
+fi
+node --check "$SRC_DIR/v4-main/bot-js/app.js"
+python3 -m py_compile "$SRC_DIR/v4-main/Api/vpn-api.py"
+
+# ---------- 4. Backup instalasi lama (bila ada) ----------
+if [ -d "$BOT_DIR" ]; then
+  bak="/root/bot-js.bak-$(date +%Y%m%d-%H%M%S)"
+  echo "Backup bot lama ke $bak"
+  cp -a "$BOT_DIR" "$bak"
+fi
+
+# ---------- 5. Prompt konfigurasi (SUDAH DIPINDAH, FASE 1) ----------
+# Blok prompt (domain, BOT_TOKEN, ADMIN_ID, H2H, Digiflazz, pilihan Xray)
+# dipindah ke sebelum langkah 3b supaya pembatalan/EOF di prompt tidak
+# meninggalkan VPS telanjang. Variabelnya (VPN_DOMAIN, BOT_TOKEN, ADMIN_ID,
+# H2H_URL, H2H_KEY, DIGI_USER, DIGI_KEY, install_xray, VPN_API_AUTH,
+# VPN_API_BASE) sudah terisi di sana dan dipakai langkah 6-9 di bawah.
 
 # ---------- 6. Salin bot + API ----------
 rm -rf "$BOT_DIR"
@@ -340,7 +364,8 @@ pm2 save || true
 pm2 startup systemd -u root --hp /root 2>/dev/null || echo "pm2 startup perlu dijalankan manual bila gagal (lihat output pm2)."
 
 # ---------- 9. Xray (wajib jalan; default YA) ----------
-read -r -p "Instal Xray? [Y/n, kosong = YA] " install_xray || true
+# Pilihan install_xray sudah ditanya sebelum langkah 3b (FASE 1); di sini
+# hanya dipakai, tidak ditanya lagi.
 if [[ ! "$install_xray" =~ ^[Nn] ]]; then
   echo "Menginstal Xray dari release resmi XTLS..."
   tag="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)" || tag=""
@@ -351,11 +376,46 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
     if curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/Xray-linux-64.zip"; then
       unzip -o xray.zip -d /tmp/xray-bin
       install -m 755 /tmp/xray-bin/xray /usr/local/bin/xray
+      # FASE 1: template config memakai aturan geoip/geosite — dat file
+      # lengkap wajib ada, kalau tidak gate run -test di bawah pasti gagal.
+      mkdir -p /usr/local/share/xray
+      DAT_FAIL=0
+      if ! curl -fsSL --retry 3 -o /usr/local/share/xray/geoip.dat "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"; then DAT_FAIL=1; fi
+      if ! curl -fsSL --retry 3 -o /usr/local/share/xray/geosite.dat "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"; then DAT_FAIL=1; fi
+      for _dat in geoip.dat geosite.dat; do
+        _sz="$(stat -c%s "/usr/local/share/xray/$_dat" 2>/dev/null || echo 0)"
+        if [ "$_sz" -lt 1048576 ]; then DAT_FAIL=1; fi
+      done
+      if [ "$DAT_FAIL" != 1 ]; then
+      # FASE 1: drop-in systemd peninggalan installer resmi Xray bisa
+      # menimpa ExecStart ke /usr/local/etc/xray/config.json (split-brain:
+      # service membaca file lain dari yang ditulis installer). Backup lalu
+      # hapus isi direktori drop-in supaya service memakai unit ini.
+      if [ -d /etc/systemd/system/xray.service.d ] && [ -n "$(ls -A /etc/systemd/system/xray.service.d 2>/dev/null)" ]; then
+        _dropbak="/root/xray-dropin-backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$_dropbak"
+        cp -a /etc/systemd/system/xray.service.d/. "$_dropbak/" 2>/dev/null || true
+        echo "Drop-in Xray lama dibackup ke $_dropbak lalu dihapus (service memakai /etc/xray/config.json)."
+        rm -f /etc/systemd/system/xray.service.d/*.conf
+      fi
       mkdir -p /etc/xray
       if [ ! -f /etc/xray/config.json ]; then
         cp "$SRC_DIR/v4-main/Cfg/config.json" /etc/xray/config.json
-        echo "Config Xray disalin dari Cfg/config.json (template bermarker)."
-        echo "Periksa domain/UUID di config itu sebelum dipakai produksi."
+        # FASE 1: kredensial contoh di template ada di repo publik — ganti
+        # dengan nilai acak di SALINAN ini (template repo tidak diubah).
+        # Hanya nilai yang diganti; struktur dan marker baris (#vless,
+        # #vmess, dsb.) tidak diubah. Template tidak punya field
+        # domain/SNI/host (TLS terminasi di haproxy); domain tetap ditulis
+        # ke /etc/xray/domain di langkah 10.
+        for _oldid in $(grep -o '"id": "[^"]*"' /etc/xray/config.json | sed 's/"id": "//; s/"//' | sort -u); do
+          _newid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "")"
+          [ -n "$_newid" ] && sed -i "s|\"id\": \"$_oldid\"|\"id\": \"$_newid\"|g" /etc/xray/config.json
+        done
+        for _oldpw in $(grep -o '"password": "[^"]*"' /etc/xray/config.json | sed 's/"password": "//; s/"//' | sort -u); do
+          _newpw="$(openssl rand -hex 16 2>/dev/null || echo "")"
+          [ -n "$_newpw" ] && sed -i "s|\"password\": \"$_oldpw\"|\"password\": \"$_newpw\"|g" /etc/xray/config.json
+        done
+        echo "Config Xray disalin dari Cfg/config.json (template bermarker); kredensial contoh sudah diganti nilai acak."
       fi
       cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
@@ -383,6 +443,10 @@ EOF
         echo "Perbaiki /etc/xray/config.json lalu: systemctl enable --now xray"
         echo "Verifikasi akhir akan menggagalkan install bila Xray tidak aktif." >&2
       fi
+      else
+        echo "ERROR: geoip.dat/geosite.dat gagal diunduh atau tidak lengkap — Xray TIDAK dijalankan." >&2
+        echo "Perbaiki jaringan lalu jalankan ulang installer." >&2
+      fi
     else
       echo "Gagal mengunduh Xray ${tag} (aset release bisa sedang ditarik/diperbarui atau jaringan sesaat). Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
     fi
@@ -396,6 +460,7 @@ fi
 # bagian dari script lengkap. Dipasang di sini agar perintah `menu` tersedia.
 # Jalur config selaras: menu, vpn-api, dan service xray sama-sama memakai
 # /etc/xray/config.json, jadi tidak ada split-brain antar pengelola.
+# (Drop-in lama yang menimpa ExecStart dihapus di langkah 9, FASE 1.)
 echo "Memasang menu utama..."
 MENU_ZIP="$SRC_DIR/v4-main/Cdy/menu.zip"
 if [ -f "$MENU_ZIP" ]; then
@@ -461,6 +526,14 @@ if systemctl is-active --quiet xray; then
   echo "OK: xray aktif"
 else
   echo "GAGAL: xray tidak aktif — Xray wajib jalan setelah install." >&2; VERIFY_FAIL=1
+fi
+# FASE 1: is-active saja tidak cukup — drop-in lama bisa membuat unit
+# efektif melayani config lain. Cek ExecStart TERAKHIR yang berlaku
+# (baris ExecStart kosong = reset, diabaikan).
+if systemctl cat xray 2>/dev/null | grep '^ExecStart=' | grep -v '^ExecStart=$' | tail -1 | grep -q '/etc/xray/config.json'; then
+  echo "OK: unit xray efektif memakai /etc/xray/config.json"
+else
+  echo "GAGAL: unit xray efektif TIDAK memakai /etc/xray/config.json — periksa drop-in di /etc/systemd/system/xray.service.d/." >&2; VERIFY_FAIL=1
 fi
 if [ -x /usr/bin/menu ]; then
   echo "OK: /usr/bin/menu terpasang"

@@ -33,6 +33,9 @@ async function initTable() {
     expiry TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`);
+  // FASE 1: penanda notifikasi mismatch (pesan ke user cukup sekali,
+  // status tetap pending untuk tindak lanjut manual).
+  await run(`ALTER TABLE sewa_orders ADD COLUMN mismatch_notified INTEGER DEFAULT 0`).catch(() => {});
 }
 
 // ---------- Buat order sewa + QRIS ----------
@@ -80,8 +83,17 @@ async function markSewaExpired(ref) {
   return r.changes || 0;
 }
 
+// FASE 1: tandai order untuk pemeriksaan manual (paid tanpa nominal yang
+// bisa diverifikasi). Poller hanya memproses status pending, jadi order
+// review berhenti dipoller sampai admin menindaklanjuti.
+async function markSewaReview(ref) {
+  const r = await run(`UPDATE sewa_orders SET status = 'review' WHERE payment_ref = ? AND status = 'pending'`, [ref]);
+  return r.changes || 0;
+}
+
 async function markSewaFulfilled(ref, expiry) {
-  await run(`UPDATE sewa_orders SET status = 'fulfilled', expiry = ? WHERE payment_ref = ?`, [expiry, ref]);
+  // FASE 1: hanya dari status paid — jangan menimpa review/expired.
+  await run(`UPDATE sewa_orders SET status = 'fulfilled', expiry = ? WHERE payment_ref = ? AND status = 'paid'`, [expiry, ref]);
 }
 
 async function getSewaOrder(ref) {
@@ -115,6 +127,6 @@ function packageListText() {
 
 module.exports = {
   PACKAGES, initTable, createSewaOrder, checkSewaPayment,
-  markSewaPaid, markSewaExpired, markSewaFulfilled, getSewaOrder,
+  markSewaPaid, markSewaExpired, markSewaReview, markSewaFulfilled, getSewaOrder,
   mySewaOrders, pendingSewaOrders, validUsername, validIp, packageListText,
 };

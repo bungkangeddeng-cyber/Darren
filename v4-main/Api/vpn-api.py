@@ -52,6 +52,22 @@ def exp_date(days):
         raise ValueError("exp tidak valid")
     return (date.today() + timedelta(days=d)).isoformat()
 
+def exp_date_from(old, days):
+    # FASE 1: renew menambah hari ke expiry LAMA (atau hari ini bila sudah
+    # lewat), bukan selalu dari hari ini — renew awal tidak boleh memangkas
+    # sisa masa aktif yang sudah dibayar. old=None (tidak terbaca) = error.
+    if not old:
+        raise ValueError("expiry lama tidak ditemukan, renew gagal")
+    try:
+        d = int(days)
+    except Exception:
+        raise ValueError("exp tidak valid")
+    if d <= 0 or d > 3650:
+        raise ValueError("exp tidak valid")
+    today = date.today().isoformat()
+    base = old if old > today else today
+    return (date.fromisoformat(base) + timedelta(days=d)).isoformat()
+
 def exp_date_or_err(q):
     try:
         return exp_date(q.get("exp"))
@@ -314,15 +330,37 @@ def create_xray_proto(kind, q):
 def renew(q):
     proto, user, exp = q.get("proto"), q.get("user"), q.get("exp")
     try:
-        expd = exp_date(exp)
-    except ValueError as e:
-        return err(str(e))
+        days = int(exp)
+        if days <= 0 or days > 3650:
+            raise ValueError("exp tidak valid")
+    except Exception:
+        return err("exp tidak valid")
     if proto == "ssh":
         if not valid_user(user):
             return err("username tidak valid")
         r = run(["id", user])
         if r.returncode != 0:
             return err("user ssh tidak ada")
+        # FASE 1: baca expiry lama dari .ssh.db (sumber yang sama dengan
+        # yang ditulis renew ini); bila tidak bisa dibaca, GAGAL eksplisit
+        # — jangan diam-diam pakai today+days (itu memangkas sisa masa).
+        old = None
+        try:
+            _p = data_path("ssh", ".ssh.db") if DATA_DIR else "/etc/ssh/.ssh.db"
+            for _ln in open(_p).read().splitlines():
+                _parts = _ln.split()
+                if len(_parts) >= 6 and _parts[0] == "#ssh#" and _parts[1] == user:
+                    old = _parts[-1]
+                    break
+                if len(_parts) >= 5 and _parts[0] == "###" and _parts[1] == user:
+                    old = _parts[4]
+                    break
+        except Exception:
+            old = None
+        try:
+            expd = exp_date_from(old, days)
+        except ValueError as e:
+            return err(str(e))
         r = run(["usermod", "-e", expd, user])
         if r.returncode != 0:
             return err("user ssh tidak ada")
@@ -347,6 +385,17 @@ def renew(q):
     with _config_lock:
         with open(CFG) as f:
             txt = f.read()
+        # FASE 1: expiry lama dibaca dari baris komentar config yang sama
+        # dengan yang ditulis renew ini; tambah hari ke yang TERBESAR
+        # antara expiry lama dan hari ini. Bila tidak ditemukan, gagal
+        # eksplisit (jangan today+days diam-diam).
+        _m = re.search(r"(^### |^## |^#& |^#! |^#!! )" + re.escape(user) + r" (\d{4}-\d{2}-\d{2})", txt, flags=re.M)
+        if not _m:
+            return err("user tidak ditemukan, renew gagal")
+        try:
+            expd = exp_date_from(_m.group(2), days)
+        except ValueError as e:
+            return err(str(e))
         txt2 = re.sub(r"(^### |^## |^#& |^#! |^#!! )" + re.escape(user) + r" \d{4}-\d{2}-\d{2}",
                       r"\g<1>" + user + " " + expd, txt, flags=re.M)
         if txt2 == txt:

@@ -79,6 +79,9 @@ async function init() {
   await run(`ALTER TABLE transactions ADD COLUMN payment_id TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE transactions ADD COLUMN sku TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE transactions ADD COLUMN gateway TEXT DEFAULT 'gopay'`).catch(() => {});
+  // FASE 1: penanda notifikasi mismatch (pesan ke user cukup sekali,
+  // status tetap pending untuk tindak lanjut manual).
+  await run(`ALTER TABLE transactions ADD COLUMN mismatch_notified INTEGER DEFAULT 0`).catch(() => {});
 
   await run(`CREATE TABLE IF NOT EXISTS notified_expired (
     account_id INTEGER PRIMARY KEY,

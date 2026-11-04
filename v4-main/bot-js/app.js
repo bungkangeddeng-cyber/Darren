@@ -1448,7 +1448,7 @@ bot.action('sewa_status', async (ctx) => {
   if (!orders.length) {
     return ctx.reply('📭 Kamu belum pernah sewa script.', { parse_mode: 'HTML' });
   }
-  const stMap = { pending: '⏳ menunggu bayar', paid: '✅ lunas, aktivasi segera', fulfilled: '🟢 aktif', failed: '❌ gagal' };
+  const stMap = { pending: '⏳ menunggu bayar', paid: '✅ lunas, aktivasi segera', fulfilled: '🟢 aktif', failed: '❌ gagal', review: '⚠️ menunggu verifikasi admin', expired: '⌛ kedaluwarsa' };
   const lines = orders.map((o, i) =>
     `${i + 1}. <code>${esc(o.username || '-')}</code> (<code>${esc(o.ip || '-')}</code>)\n` +
     `   📦 ${o.days} hari — ${stMap[o.status] || esc(o.status)}${o.expiry ? ` s/d ${o.expiry}` : ''}`
@@ -1490,9 +1490,15 @@ bot.action(/^sewa_cek_(.+)$/, async (ctx) => {
   if (order.status === 'paid') return doRegister();
   const st = await sewa.checkSewaPayment(order.payment_id).catch(() => ({ status: 'unknown', paidAmount: null }));
   if (h2h.isPaidStatus(st.status)) {
+    // FASE 1: paid TANPA field amount = TIDAK terverifikasi — jangan
+    // aktifkan; tandai review untuk pemeriksaan manual.
+    if (st.paidAmount == null) {
+      await sewa.markSewaReview(ref).catch(() => {});
+      return ctx.reply(`⚠️ <b>Pembayaran tercatat, menunggu verifikasi admin.</b>\n\nPembayaran order sewa kamu sudah tercatat di gateway, tapi nominalnya belum bisa diverifikasi otomatis sehingga lisensi BELUM diaktifkan.\n🧾 Ref: <code>${esc(ref)}</code>\nAdmin akan memeriksa manual — jangan bayar ulang.`, { parse_mode: 'HTML' });
+    }
     // Verifikasi nominal (BARU di rombak H2H): tombol cek manual juga tidak
     // boleh mengaktifkan order bila nominal gateway tidak cocok.
-    if (st.paidAmount != null && Math.abs(Number(st.paidAmount) - Number(order.amount)) > 1000) {
+    if (Math.abs(Number(st.paidAmount) - Number(order.amount)) > 1000) {
       return ctx.reply(`❌ Nominal pembayaran tidak cocok (tercatat <b>${digi.rp(order.amount)}</b>). Hubungi admin.`, { parse_mode: 'HTML' });
     }
     await sewa.markSewaPaid(ref);
@@ -1803,18 +1809,33 @@ async function finishRenew(ctx, accountId, days) {
   base.setDate(base.getDate() + days);
   const newExpiry = base.toISOString().slice(0, 10);
   await ctx.reply('⏳ Memperpanjang akun...');
-  // Coba API renew (best effort)
+  // FASE 1: renew HANYA bila API mengonfirmasi success. Dulu blok ini
+  // best-effort (.catch(()=>{})) lalu tetap UPDATE expiry + potong saldo,
+  // sehingga user membayar padahal akun tidak diperpanjang.
+  let renewOk = false;
+  let renewErr = '';
   try {
     const axios = require('axios');
     const config = require('./src/config');
     const srv = await vpn.getServer(acc.server_id).catch(() => null);
     const renewBase = (srv && srv.api_base) || config.vpn.apiBase;
     const renewAuth = (srv && srv.api_auth) || config.vpn.apiAuth;
-    await axios.get(`${renewBase}/renew`, {
+    const res = await axios.get(`${renewBase}/renew`, {
       params: { auth: renewAuth, proto: acc.proto, user: acc.username, exp: days },
       timeout: 25000,
-    }).catch(() => {});
-  } catch (e) {}
+    });
+    renewOk = res?.data?.status === 'success';
+    if (!renewOk) renewErr = res?.data?.message || 'API renew gagal';
+  } catch (e) {
+    renewOk = false;
+    renewErr = 'API renew tidak merespons (timeout/jaringan)';
+  }
+  if (!renewOk) {
+    return ctx.reply(
+      `❌ <b>Renew gagal.</b>\n\nAkun <code>${esc(acc.username)}</code> TIDAK diperpanjang dan saldo TIDAK terpotong.\nAlasan: ${esc(renewErr)}\nSilakan coba lagi atau hubungi admin.`,
+      { parse_mode: 'HTML' }
+    );
+  }
   await run('UPDATE vpn_accounts SET expiry = ? WHERE id = ?', [newExpiry, accountId]);
   await ppob.deductSaldo(ctx.from.id, totalHarga);
   await run('INSERT INTO transactions (telegram_id, type, amount, ref_id, status) VALUES (?,?,?,?,?)',
@@ -2500,7 +2521,7 @@ bot.action('adm_topuplog', async (ctx) => {
   const rows = await all("SELECT telegram_id, amount, ref_id, status, created_at FROM transactions WHERE type = 'deposit' ORDER BY id DESC LIMIT 10");
   if (!rows.length) return ctx.reply('📑 Belum ada log topup.');
   const lines = rows.map((r, i) =>
-    `${i + 1}. 👤 <code>${r.telegram_id}</code> — <b>Rp${Number(r.amount).toLocaleString('id-ID')}</b>\n   ${r.status === 'success' ? '✅' : r.status === 'pending' ? '⏳' : '❌'} <code>${esc(r.ref_id)}</code> • ${esc(r.created_at || '')}`
+    `${i + 1}. 👤 <code>${r.telegram_id}</code> — <b>Rp${Number(r.amount).toLocaleString('id-ID')}</b>\n   ${r.status === 'success' ? '✅' : r.status === 'pending' ? '⏳' : r.status === 'review' ? '⚠️' : '❌'} <code>${esc(r.ref_id)}</code> • ${esc(r.created_at || '')}`
   );
   await ctx.reply(`📑 <b>Log Topup (10 terakhir)</b>\n\n${lines.join('\n\n')}`, {
     parse_mode: 'HTML',
@@ -3062,7 +3083,7 @@ setInterval(async () => {
   try {
     const { all, run } = require('./src/db');
     const pending = await all(
-      `SELECT telegram_id, amount, ref_id, payment_id, gateway FROM transactions
+      `SELECT telegram_id, amount, ref_id, payment_id, gateway, mismatch_notified FROM transactions
        WHERE type = 'deposit' AND status = 'pending' AND payment_id != ''
          AND created_at > datetime('now','-7 days')`
     ).catch(() => []);
@@ -3075,9 +3096,34 @@ setInterval(async () => {
           const st = await h2h.getQrisStatus(tx.payment_id).catch(() => ({ ok: false }));
           if (!st.ok) continue; // gateway tak menjawab; coba putaran berikutnya
           if (h2h.isPaidStatus(st.status)) {
+            // FASE 1: paid TANPA field amount = TIDAK terverifikasi.
+            // Jangan kredit diam-diam (fail-open lama); tandai review
+            // (poller hanya memproses status pending) + beri tahu user.
+            if (st.paidAmount == null) {
+              const mv = await run(`UPDATE transactions SET status = 'review' WHERE ref_id = ? AND status = 'pending'`, [tx.ref_id]);
+              if (mv.changes) {
+                await bot.telegram.sendMessage(
+                  tx.telegram_id,
+                  `⚠️ <b>Pembayaran tercatat, menunggu verifikasi admin.</b>\n\nPembayaran deposit kamu sudah tercatat di gateway, tapi nominalnya belum bisa diverifikasi otomatis sehingga saldo BELUM ditambahkan.\n🧾 Ref: <code>${esc(tx.ref_id)}</code>\nAdmin akan memeriksa manual — jangan bayar ulang.`,
+                  { parse_mode: 'HTML' }
+                ).catch(() => {});
+                console.error('[deposit] paid tanpa nominal, ditandai review:', tx.ref_id);
+              }
+              continue;
+            }
             // Verifikasi nominal (dipertahankan dari jalur lama): selisih kode
             // unik kecil (<=1000) ditoleransi; selisih lebih besar = jangan kredit.
-            if (st.paidAmount != null && Math.abs(Number(st.paidAmount) - Number(tx.amount)) > 1000) {
+            // Pesan ke user cukup sekali (mismatch_notified) walau status
+            // tetap pending untuk tindak lanjut manual.
+            if (Math.abs(Number(st.paidAmount) - Number(tx.amount)) > 1000) {
+              if (!tx.mismatch_notified) {
+                await run(`UPDATE transactions SET mismatch_notified = 1 WHERE ref_id = ?`, [tx.ref_id]).catch(() => {});
+                await bot.telegram.sendMessage(
+                  tx.telegram_id,
+                  `⚠️ <b>Nominal deposit tidak cocok.</b>\n\nPembayaran kamu tercatat, tapi nominalnya tidak sama dengan deposit yang dibuat (<b>${digi.rp(tx.amount)}</b>), sehingga saldo BELUM ditambahkan.\n🧾 Ref: <code>${esc(tx.ref_id)}</code>\nHubungi admin dengan nomor ref ini untuk tindak lanjut (verifikasi/refund). Jangan bayar ulang sebelum ada arahan admin.`,
+                  { parse_mode: 'HTML' }
+                ).catch(() => {});
+              }
               console.error('[deposit] nominal H2H tidak cocok, tidak dikreditkan:', tx.ref_id, 'db=', tx.amount, 'gateway=', st.paidAmount);
               continue;
             }
@@ -3092,12 +3138,25 @@ setInterval(async () => {
           continue; // gateway lama (P2P) — tidak lagi dipoller sejak rombak H2H
         }
         if (!isPaid) continue;
-        const r = await run(
-          `UPDATE transactions SET status = 'success' WHERE ref_id = ? AND status = 'pending'`,
-          [tx.ref_id]
-        );
-        if (!r.changes) continue; // sudah diproses (anti dobel kredit)
-        const s = await ppob.addSaldo(tx.telegram_id, tx.amount);
+        // FASE 1: klaim + kredit SATU transaksi SQLite. Crash di antara
+        // klaim dan kredit dulu meninggalkan deposit 'success' tanpa saldo;
+        // sekarang gagal di tengah = rollback, baris tetap pending dan
+        // diproses ulang putaran berikutnya (klaim tetap anti dobel).
+        let s = null;
+        try {
+          await run('BEGIN IMMEDIATE');
+          const r = await run(
+            `UPDATE transactions SET status = 'success' WHERE ref_id = ? AND status = 'pending'`,
+            [tx.ref_id]
+          );
+          if (!r.changes) { await run('ROLLBACK'); continue; } // sudah diproses
+          s = await ppob.addSaldo(tx.telegram_id, tx.amount);
+          await run('COMMIT');
+        } catch (e) {
+          await run('ROLLBACK').catch(() => {});
+          console.error('[deposit] transaksi klaim+kredit gagal, di-rollback:', tx.ref_id, e.message);
+          continue;
+        }
         // Otomatis jadi reseller bila total topup mencapai batas (diatur admin)
         try {
           const minRes = await settings.getResellerMinTopup();
@@ -3144,9 +3203,9 @@ setInterval(async () => {
 // manual button can retry, it is never marked fulfilled on failure.
 setInterval(async () => {
   try {
-    const { all } = require('./src/db');
+    const { all, run } = require('./src/db');
     const pending = await all(
-      `SELECT payment_ref, payment_id, amount FROM sewa_orders WHERE status = 'pending' AND created_at > datetime('now','-7 days')`
+      `SELECT payment_ref, payment_id, amount, telegram_id, mismatch_notified FROM sewa_orders WHERE status = 'pending' AND created_at > datetime('now','-7 days')`
     ).catch(() => []);
     for (const o of pending) {
       try {
@@ -3157,9 +3216,33 @@ setInterval(async () => {
           continue;
         }
         if (!h2h.isPaidStatus(st.status)) continue; // masih pending / tak dikenal = belum lunas
-        // Verifikasi nominal (BARU di rombak H2H — dulu sewa tanpa verifikasi
-        // nominal sama sekali): toleransi Rp1.000 menutup selisih kode unik.
-        if (st.paidAmount != null && Math.abs(Number(st.paidAmount) - Number(o.amount)) > 1000) {
+        // FASE 1: paid TANPA field amount = TIDAK terverifikasi — jangan
+        // aktifkan diam-diam; tandai review (poller hanya memproses
+        // pending) + beri tahu user.
+        if (st.paidAmount == null) {
+          const mv = await sewa.markSewaReview(o.payment_ref).catch(() => 0);
+          if (mv) {
+            await bot.telegram.sendMessage(
+              o.telegram_id,
+              `⚠️ <b>Pembayaran sewa tercatat, menunggu verifikasi admin.</b>\n\nPembayaran order sewa kamu sudah tercatat di gateway, tapi nominalnya belum bisa diverifikasi otomatis sehingga lisensi BELUM diaktifkan.\n🧾 Ref: <code>${esc(o.payment_ref)}</code>\nAdmin akan memeriksa manual — jangan bayar ulang.`,
+              { parse_mode: 'HTML' }
+            ).catch(() => {});
+            console.error('[sewa] paid tanpa nominal, ditandai review:', o.payment_ref);
+          }
+          continue;
+        }
+        // Verifikasi nominal: toleransi Rp1.000 menutup selisih kode unik.
+        // Pesan ke user cukup sekali (mismatch_notified) walau status
+        // tetap pending untuk tindak lanjut manual.
+        if (Math.abs(Number(st.paidAmount) - Number(o.amount)) > 1000) {
+          if (!o.mismatch_notified) {
+            await run(`UPDATE sewa_orders SET mismatch_notified = 1 WHERE payment_ref = ?`, [o.payment_ref]).catch(() => {});
+            await bot.telegram.sendMessage(
+              o.telegram_id,
+              `⚠️ <b>Nominal pembayaran sewa tidak cocok.</b>\n\nPembayaran kamu tercatat, tapi nominalnya tidak sama dengan order sewa (<b>${digi.rp(o.amount)}</b>), sehingga lisensi BELUM diaktifkan.\n🧾 Ref: <code>${esc(o.payment_ref)}</code>\nHubungi admin dengan nomor ref ini untuk tindak lanjut (verifikasi/refund). Jangan bayar ulang sebelum ada arahan admin.`,
+              { parse_mode: 'HTML' }
+            ).catch(() => {});
+          }
           console.error('[sewa] nominal tidak cocok, tidak diaktifkan:', o.payment_ref, 'db=', o.amount, 'gateway=', st.paidAmount);
           continue;
         }
