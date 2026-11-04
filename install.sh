@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Yang diinstal: bot-js (Telegram) + VPN API lokal (port 5890, localhost saja),
-# Xray opsional, menu utama SSH (menu.zip -> /usr/bin), dan vnstat untuk traffic menu.
+# Xray (wajib jalan; default YA), menu utama SSH (menu.zip -> /usr/bin), dan vnstat untuk traffic menu.
 # Uninstaller pasangannya: uninstall.sh (repo yang sama).
 #
 # Cara pakai di VPS baru (sebagai root):
@@ -226,13 +226,18 @@ echo ""
 echo "Isi konfigurasi berikut. Kosongkan yang opsional bila belum ada."
 read -r -p "Domain VPS kamu (contoh: vpn.contoh.com, kosong = localhost saja): " VPN_DOMAIN || true
 while true; do
-  read -r -s -p "BOT_TOKEN Telegram (dari BotFather, tidak akan tampil): " BOT_TOKEN || true
+  if ! read -r -s -p "BOT_TOKEN Telegram (dari BotFather, tidak akan tampil): " BOT_TOKEN; then
+    echo ""
+    if [ -z "$BOT_TOKEN" ]; then echo "ERROR: input berakhir (EOF) sebelum BOT_TOKEN diisi — jalankan installer secara interaktif, bukan lewat pipe tertutup." >&2; exit 1; fi
+  fi
   echo ""
   if [ -n "$BOT_TOKEN" ]; then break; fi
   echo "BOT_TOKEN wajib diisi."
 done
 while true; do
-  read -r -p "ADMIN_ID Telegram (angka saja): " ADMIN_ID || true
+  if ! read -r -p "ADMIN_ID Telegram (angka saja): " ADMIN_ID; then
+    if [ -z "$ADMIN_ID" ]; then echo "ERROR: input berakhir (EOF) sebelum ADMIN_ID diisi — jalankan installer secara interaktif, bukan lewat pipe tertutup." >&2; exit 1; fi
+  fi
   if [[ "$ADMIN_ID" =~ ^[0-9]+$ ]]; then break; fi
   echo "ADMIN_ID harus angka."
 done
@@ -298,7 +303,14 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now vpn-api
+# Restart eksplisit (bukan hanya enable --now yang no-op pada service aktif):
+# pada reinstall, biner + auth.env baru harus dimuat proses yang sedang jalan.
+systemctl enable vpn-api
+if systemctl is-active --quiet vpn-api; then
+  systemctl restart vpn-api || echo "PERINGATAN: restart vpn-api gagal — verifikasi akhir akan menandainya." >&2
+else
+  systemctl start vpn-api || echo "PERINGATAN: start vpn-api gagal — verifikasi akhir akan menandainya." >&2
+fi
 
 # ---------- 8. Bot ----------
 cd "$BOT_DIR"
@@ -309,13 +321,13 @@ pm2 start app.js --name ripzz-bot-js
 pm2 save || true
 pm2 startup systemd -u root --hp /root 2>/dev/null || echo "pm2 startup perlu dijalankan manual bila gagal (lihat output pm2)."
 
-# ---------- 9. Xray opsional ----------
-read -r -p "Instal Xray juga? [y/N] " install_xray || true
-if [[ "$install_xray" =~ ^[Yy]$ ]]; then
+# ---------- 9. Xray (wajib jalan; default YA) ----------
+read -r -p "Instal Xray? [Y/n, kosong = YA] " install_xray || true
+if [[ ! "$install_xray" =~ ^[Nn] ]]; then
   echo "Menginstal Xray dari release resmi XTLS..."
   tag="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)" || tag=""
   if [ -z "$tag" ]; then
-    echo "Gagal mendapatkan versi Xray terbaru. Lewati instalasi Xray." >&2
+    echo "Gagal mendapatkan versi Xray terbaru. Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
   else
     cd /tmp
     if curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/Xray-linux-64.zip"; then
@@ -340,18 +352,25 @@ WantedBy=multi-user.target
 EOF
       systemctl daemon-reload
       if /usr/local/bin/xray run -test -c /etc/xray/config.json; then
-        systemctl enable --now xray
+        # Restart eksplisit (bukan hanya enable --now yang no-op pada service aktif).
+        systemctl enable xray
+        if systemctl is-active --quiet xray; then
+          systemctl restart xray || echo "PERINGATAN: restart xray gagal — verifikasi akhir akan menandainya." >&2
+        else
+          systemctl start xray || echo "PERINGATAN: start xray gagal — verifikasi akhir akan menandainya." >&2
+        fi
         echo "Xray aktif."
       else
         echo "PERINGATAN: config Xray gagal validasi. Xray TIDAK dijalankan."
         echo "Perbaiki /etc/xray/config.json lalu: systemctl enable --now xray"
+        echo "Verifikasi akhir akan menggagalkan install bila Xray tidak aktif." >&2
       fi
     else
-      echo "Gagal mengunduh Xray ${tag} (aset release bisa sedang ditarik/diperbarui atau jaringan sesaat). Lewati instalasi Xray." >&2
+      echo "Gagal mengunduh Xray ${tag} (aset release bisa sedang ditarik/diperbarui atau jaringan sesaat). Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
     fi
   fi
 else
-  echo "Xray dilewati. Akun non-CF butuh Xray yang sudah berjalan di server ini."
+  echo "Xray TIDAK diinstal (jawaban N). Karena Xray wajib jalan setelah install, verifikasi akhir (langkah 11) akan menggagalkan install." >&2
 fi
 
 # ---------- 10. Menu utama (bagian dari script lengkap) ----------
@@ -401,12 +420,51 @@ if [ -n "${IZIN_TOKEN:-}" ]; then
 fi
 unset IZIN_TOKEN
 
-# ---------- 11. Verifikasi ----------
+# ---------- 11. Verifikasi (HARUS lolos semua; bila ada yang gagal, install GAGAL) ----------
 echo ""
 echo "=== Verifikasi ==="
-systemctl is-active vpn-api || echo "vpn-api TIDAK aktif — cek: journalctl -u vpn-api -n 50"
-curl -fsSL http://127.0.0.1:5890/health || echo "Health API tidak merespon."
-pm2 list || true
+VERIFY_FAIL=0
+if systemctl is-active --quiet vpn-api; then
+  echo "OK: vpn-api aktif"
+else
+  echo "GAGAL: vpn-api tidak aktif — cek: journalctl -u vpn-api -n 50" >&2; VERIFY_FAIL=1
+fi
+if curl -fsSL http://127.0.0.1:5890/health >/dev/null 2>&1; then
+  echo "OK: API 127.0.0.1:5890/health merespon"
+else
+  echo "GAGAL: Health API tidak merespon." >&2; VERIFY_FAIL=1
+fi
+if pm2 describe ripzz-bot-js 2>/dev/null | grep -q "online"; then
+  echo "OK: bot PM2 ripzz-bot-js online"
+else
+  echo "GAGAL: bot PM2 ripzz-bot-js tidak online — cek: pm2 list" >&2; VERIFY_FAIL=1
+fi
+if systemctl is-active --quiet xray; then
+  echo "OK: xray aktif"
+else
+  echo "GAGAL: xray tidak aktif — Xray wajib jalan setelah install." >&2; VERIFY_FAIL=1
+fi
+if [ -x /usr/bin/menu ]; then
+  echo "OK: /usr/bin/menu terpasang"
+else
+  echo "GAGAL: /usr/bin/menu tidak ditemukan/tidak executable." >&2; VERIFY_FAIL=1
+fi
+if [ -x /usr/bin/cek-izin ]; then
+  echo "OK: /usr/bin/cek-izin terpasang"
+else
+  echo "GAGAL: /usr/bin/cek-izin tidak ditemukan/tidak executable." >&2; VERIFY_FAIL=1
+fi
+# pm2 startup yang gagal TIDAK menggagalkan verifikasi (bot tetap jalan di sesi
+# ini), tapi tampilkan perintah manualnya dengan MENONJOL bila belum aktif.
+if ! systemctl is-enabled pm2-root >/dev/null 2>&1; then
+  echo "PERHATIAN: pm2 startup belum aktif — bot TIDAK akan auto-start saat boot."
+  echo "Jalankan manual: pm2 startup systemd -u root --hp /root"
+fi
+if [ "$VERIFY_FAIL" = "1" ]; then
+  echo "" >&2
+  echo "=== VERIFIKASI GAGAL: install TIDAK selesai. Perbaiki item GAGAL di atas lalu jalankan ulang installer. ===" >&2
+  exit 1
+fi
 echo ""
 echo "=== Selesai ==="
 echo "Bot: /root/bot-js (pm2: ripzz-bot-js)"
