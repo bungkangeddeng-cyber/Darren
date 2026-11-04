@@ -2477,6 +2477,7 @@ const apiMenuKb = () => ({ inline_keyboard: [
   [sBtn('👤 Input User Digiflazz', 'adm_api_DIGIFLAZZ_USERNAME', 'primary'), sBtn('🔑 Input Kunci Digiflazz', 'adm_api_DIGIFLAZZ_API_KEY', 'primary')],
   [sBtn('🔗 URL Webhook', 'adm_api_url', 'primary'), sBtn('🔄 Terapkan &amp; Restart Bot', 'adm_api_apply', 'success')],
   [sBtn('📡 Daftarkan Webhook', 'adm_api_register', 'success')],
+  [sBtn('👁️ Tampilkan Secret 10 Detik', 'adm_api_showsecret', 'warning')],
   [sBtn('🔙 Kembali', 'adm_back', 'danger')],
 ] });
 bot.action('adm_api', async (ctx) => {
@@ -2539,6 +2540,20 @@ bot.action('adm_api_register', async (ctx) => {
     else if (m.includes('503')) hint = '\n\n<i>503 = layanan akun gateway tidak jalan.</i>';
     return ctx.reply(`❌ Gagal mendaftar: ${esc(m)}${hint}`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
   }
+});
+bot.action('adm_api_showsecret', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  sessions.delete(ctx.chat.id);
+  const sec = config.webhook?.secret || '';
+  if (!sec) return ctx.reply('❌ Secret belum ada. Restart bot sekali (secret dibuat otomatis), lalu coba lagi.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  const sent = await ctx.reply(`🔑 <b>Secret webhook aktif</b> (hapus otomatis 10 detik):\n<code>${esc(sec)}</code>\n\n<i>Salin sekarang. Jangan teruskan pesan ini ke siapa pun.</i>`, { parse_mode: 'HTML' });
+  setTimeout(async () => {
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat.id, sent.message_id);
+      await ctx.reply('✅ Pesan secret sudah dihapus otomatis.', { parse_mode: 'HTML' });
+    } catch (_) {}
+  }, 10000);
 });
 bot.action('adm_back', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
