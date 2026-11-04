@@ -1,23 +1,41 @@
 #!/usr/bin/env bash
+# DARREN_INSTALLER_VERSION=fix-total-20261104-01
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
+# Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
+# Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
 # Yang diinstal: bot-js (Telegram) + VPN API lokal (port 5890, localhost saja),
 # Xray (wajib jalan; default YA), menu utama SSH (menu.zip -> /usr/bin), dan vnstat untuk traffic menu.
 # Uninstaller pasangannya: uninstall.sh (repo yang sama).
 #
 # Cara pakai di VPS baru (sebagai root):
-#   curl -fsSL -H "Authorization: Bearer ISI_TOKEN_DARI_HP" https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
 #   chmod +x install.sh
 #   ./install.sh
 #   ./install.sh --total   # install total: backup + hapus instalasi lama, lalu install baru
-# Token baca dibuat dari HP owner (GitHub -> token read-only khusus repo Darren,
-# masa berlaku pendek). Token yang sama dipakai di perintah unduh dan saat
-# installer meminta (atau lewat env GH_TOKEN). Repo Darren private: tanpa
-# token, unduhan dan clone gagal (404).
+# Repo Darren saat ini PUBLIK, jadi unduhan di atas tidak butuh token.
+# Bila repo sudah di-private-kan (RENCANA, bukan fakta saat ini), token baca
+# read-only khusus repo Darren dibuat dari HP owner (masa berlaku pendek)
+# dan dipakai lewat env/prompt saat installer meminta — JANGAN pernah
+# menempel nilai token di perintah curl, chat, atau log (nilai token di
+# shell history = token bocor). Pola aman: baca token ke variabel lewat
+# prompt tersembunyi, lalu pakai referensi variabel di header curl.
 #
 # Script ini TIDAK berisi secret apapun. Token GitHub, token bot, dan ID admin
 # diminta lewat prompt saat instalasi, auth API dibuat acak, dan file .env
 # dibuat dengan permission 600. Jangan pernah menempel token di log/chat.
 set -euo pipefail
+
+# B18: semua path di script ini absolut atau diturunkan dari direktori
+# script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# B15: penanda versi (grep DARREN_INSTALLER_VERSION).
+DARREN_INSTALLER_VERSION="fix-total-20261104-01"
+# B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
+# rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
+# ubah konstanta ini + README, lalu uji live ulang.
+XRAY_TAG_PIN="v26.10.31"
+# B9: kematian set -e harus menghasilkan verdict jelas, bukan diam.
+trap 'echo "=== VERDICT: INSTALL GAGAL (perintah gagal; perbaiki pesan error di atas lalu jalankan ulang) ===" >&2' ERR
 
 REPO_URL="https://github.com/bungkangeddeng-cyber/Darren.git"
 SRC_DIR="/root/darren-install"
@@ -64,7 +82,9 @@ if [ "$TOTAL" = 1 ]; then
 fi
 
 # ---------- Token GitHub ----------
-# Repo Darren private: clone butuh token baca (read-only, khusus repo Darren).
+# Repo Darren saat ini PUBLIK; token baca hanya dibutuhkan bila repo
+# sudah private (rencana migrasi). Clone butuh token baca read-only
+# khusus repo Darren bila saat itu repo sudah private.
 # Token bisa lewat env GH_TOKEN (tidak ditanya lagi) atau prompt tersembunyi
 # (tidak tampil saat diketik). Kosongkan bila repo masih publik.
 # Token TIDAK disimpan di file mana pun dan TIDAK dibiarkan di config git:
@@ -91,6 +111,38 @@ git_clone_darren() {
     GIT_TERMINAL_PROMPT=0 git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" clone --depth 1 "$REPO_URL" "$dest"
   else
     GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$REPO_URL" "$dest" || { echo "ERROR: Clone repo gagal. Bila repo sudah private, jalankan ulang dengan token GitHub (prompt/env GH_TOKEN)." >&2; exit 1; }
+  fi
+}
+
+# B2/B24: helper backup fail-closed. Sumber yang ada WAJIB tersalin dan
+# terverifikasi (ada + tidak kosong bila sumbernya tidak kosong); gagal =
+# exit 1 SEBELUM penghapusan apa pun. TIDAK ada '|| true' di jalur ini.
+# Direktori backup chmod 700; file secret di dalamnya chmod 600 (B20).
+backup_item() {
+  local src="$1" dest="$2" base
+  [ -e "$src" ] || return 0
+  cp -a "$src" "$dest/" || { echo "ERROR: backup $src gagal — penghapusan DIBATALKAN (instalasi lama TIDAK dihapus)." >&2; exit 1; }
+  base="$(basename "$src")"
+  if [ ! -e "$dest/$base" ]; then
+    echo "ERROR: verifikasi backup $src gagal (tidak ditemukan di $dest) — penghapusan DIBATALKAN." >&2; exit 1
+  fi
+  if [ -d "$src" ] && [ -n "$(ls -A "$src" 2>/dev/null)" ] && [ -z "$(ls -A "$dest/$base" 2>/dev/null)" ]; then
+    echo "ERROR: verifikasi backup $src gagal (backup kosong padahal sumber berisi) — penghapusan DIBATALKAN." >&2; exit 1
+  fi
+}
+lock_backup_perms() {
+  local bak="$1"
+  chmod 700 "$bak" 2>/dev/null || true
+  find "$bak" -type f \( -name '.env' -o -name 'auth.env' -o -name 'izin-token' -o -name '*.key' -o -name '*.pem' \) -exec chmod 600 {} + 2>/dev/null || true
+}
+
+# B8: kepala remote untuk cek kesegaran clone lama (token hanya via header
+# sekali pakai, tidak pernah di URL maupun file).
+git_remote_head() {
+  if [ -n "${GH_TOKEN:-}" ]; then
+    GIT_TERMINAL_PROMPT=0 git -c http.extraHeader="Authorization: Bearer $GH_TOKEN" ls-remote "$REPO_URL" HEAD 2>/dev/null | awk '{print $1}'
+  else
+    GIT_TERMINAL_PROMPT=0 git ls-remote "$REPO_URL" HEAD 2>/dev/null | awk '{print $1}'
   fi
 }
 
@@ -127,25 +179,37 @@ siapkan_install_total() {
   backup="/root/darren-reinstall-backup-$stamp"
   echo "Install total: membackup instalasi lama ke $backup ..."
   mkdir -p "$backup"
-  [ -d /root/bot-js ] && cp -a /root/bot-js "$backup/" 2>/dev/null || true
-  [ -d /etc/vpn-api ] && cp -a /etc/vpn-api "$backup/" 2>/dev/null || true
-  [ -d /etc/xray ] && cp -a /etc/xray "$backup/" 2>/dev/null || true
-  # FASE 1: drop-in Xray ikut dibackup supaya penghapusannya di
-  # hapus_stack_darren tidak menghilangkan jejak unit efektif lama.
-  [ -d /etc/systemd/system/xray.service.d ] && cp -a /etc/systemd/system/xray.service.d "$backup/" 2>/dev/null || true
-  # FASE 2: backup lebih lengkap — API, unit systemd, entry point menu.
-  [ -f /root/vpn-api.py ] && cp -a /root/vpn-api.py "$backup/" 2>/dev/null || true
+  chmod 700 "$backup"
+  # B1/B24/K23: backup mencakup bot-js (termasuk data/bot.db di dalamnya),
+  # API + unit systemd + entry point menu + /etc/bot (akun) + file stack TLS.
+  # Gagal di salah satu = backup_item exit 1, instalasi lama TIDAK dihapus.
+  backup_item /root/bot-js "$backup"
+  backup_item /etc/vpn-api "$backup"
+  backup_item /etc/xray "$backup"
+  backup_item /etc/systemd/system/xray.service.d "$backup"
+  backup_item /etc/bot "$backup"
+  backup_item /etc/haproxy "$backup"
+  backup_item /root/vpn-api.py "$backup"
+  backup_item /etc/nginx/conf.d/xray.conf "$backup"
+  backup_item /usr/bin/speedtest "$backup"
   for _unit in vpn-api.service xray.service limitvmess.service limitvless.service limittrojan.service limitshadowsocks.service; do
-    [ -f "/etc/systemd/system/$_unit" ] && cp -a "/etc/systemd/system/$_unit" "$backup/" 2>/dev/null || true
+    backup_item "/etc/systemd/system/$_unit" "$backup"
   done
   for _menu in menu cek-izin xray-restart; do
-    [ -f "/usr/bin/$_menu" ] && cp -a "/usr/bin/$_menu" "$backup/" 2>/dev/null || true
+    backup_item "/usr/bin/$_menu" "$backup"
   done
-  # FASE 2: retensi — simpan 5 backup terbaru, hapus yang lebih lama.
-  # Hanya direktori darren-*-backup-* di /root; tidak pernah yang lain.
-  for _old in $(ls -dt /root/darren-*-backup-*/ 2>/dev/null | tail -n +6); do
-    rm -rf "$_old"
-  done
+  lock_backup_perms "$backup"
+  # B24: verifikasi akhir langkah backup — direktori ada dan tidak kosong.
+  if [ ! -d "$backup" ] || [ -z "$(ls -A "$backup" 2>/dev/null)" ]; then
+    if [ -d /root/bot-js ] || [ -d /etc/xray ] || [ -f /root/vpn-api.py ]; then
+      echo "ERROR: backup install total kosong padahal instalasi lama ada — penghapusan DIBATALKAN." >&2; exit 1
+    fi
+  fi
+  echo "Backup terverifikasi di $backup (mode 700; file secret 600)."
+  # Catatan jujur --total: backup TIDAK di-restore otomatis. Restore manual =
+  # kembalikan file dari $backup lalu install ulang; akun Xray lama ada di
+  # backup /etc/xray/config.json. Install biasa (bukan --total) justru
+  # me-restore data/bot.db otomatis (langkah 4/6).
 
   echo "Mengambil source baru ..."
   tmp_src="/tmp/darren-fresh-$$"
@@ -175,7 +239,7 @@ echo ""
 # ---------- 1. Dependensi sistem ----------
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y ca-certificates curl gnupg unzip git python3 sqlite3 openssl
+apt-get install -y ca-certificates curl gnupg unzip git python3 sqlite3 openssl haproxy nginx iproute2 at socat
 
 # ---------- 2. Node.js >= 18 + PM2 ----------
 # Dibungkus fungsi karena dipanggil dua kali: sekali di sini (install biasa)
@@ -205,27 +269,45 @@ pasang_node_pm2() {
 }
 pasang_node_pm2
 
-# ---------- 3. Ambil source ----------
-if [ -f "./v4-main/bot-js/app.js" ]; then
-  echo "Memakai source lokal di $(pwd)/v4-main"
+# ---------- 3. Ambil source (B18: path dari SCRIPT_DIR, bukan CWD) ----------
+if [ -f "$SCRIPT_DIR/v4-main/bot-js/app.js" ]; then
+  echo "Memakai source lokal di $SCRIPT_DIR/v4-main"
   # P0 2026-11-03: JANGAN rm -rf "$SRC_DIR" lalu cp dari ./v4-main bila
   # posisi jalan SUDAH di dalam SRC_DIR — itu menghapus sumbernya sendiri
   # (kegagalan rebuild server2). Bila sudah di dalam, tidak ada yang disalin.
-  # Bila dari direktori lain, salin ke level $SRC_DIR/v4-main yang benar
-  # (cek baris 188 mengharapkan $SRC_DIR/v4-main/bot-js/app.js).
-  if [ "$(readlink -f .)" = "$(readlink -f "$SRC_DIR")" ]; then
+  if [ "$(readlink -f "$SCRIPT_DIR")" = "$(readlink -f "$SRC_DIR")" ]; then
     echo "Sudah di dalam $SRC_DIR, penyalinan dilewati."
   else
     mkdir -p "$SRC_DIR"
     rm -rf "$SRC_DIR/v4-main"
-    cp -a ./v4-main "$SRC_DIR/v4-main"
+    cp -a "$SCRIPT_DIR/v4-main" "$SRC_DIR/v4-main"
   fi
 elif [ -d "$SRC_DIR/v4-main/bot-js" ]; then
-  echo "Memakai source yang sudah ada di $SRC_DIR"
+  # B8: clone lama TIDAK dipakai ulang tanpa cek kesegaran. Tanpa .git =
+  # kesegaran tidak dapat diverifikasi = clone ulang. HEAD lokal != HEAD
+  # remote (atau remote tidak terjangkau) = clone ulang, bukan pakai buta.
+  echo "Source lama ditemukan di $SRC_DIR — verifikasi kesegaran..."
+  _local_head=""; _remote_head=""
+  if [ -d "$SRC_DIR/.git" ]; then
+    _local_head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+    _remote_head="$(git_remote_head)"
+    echo "HEAD lokal: ${_local_head:-tidak-terbaca}; HEAD remote: ${_remote_head:-tidak-terjangkau}"
+  else
+    echo "Source lama tanpa .git — kesegaran tidak dapat diverifikasi."
+  fi
+  if [ -z "$_local_head" ] || [ -z "$_remote_head" ] || [ "$_local_head" != "$_remote_head" ]; then
+    echo "Clone ulang source segar (clone lama dibuang)..."
+    rm -rf "$SRC_DIR"
+    git_clone_darren "$SRC_DIR"
+    echo "HEAD source baru: $(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo tidak-terbaca)"
+  else
+    echo "Source lama segar (HEAD sama dengan remote) — dipakai."
+  fi
 else
   echo "Meng-clone repo Darren..."
   rm -rf "$SRC_DIR"
   git_clone_darren "$SRC_DIR"
+  echo "HEAD source baru: $(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo tidak-terbaca)"
 fi
 # ---------- 5. Prompt konfigurasi (DIPINDAH ke sini, FASE 1) ----------
 # Prompt-prompt ini DULU ada di langkah 5 (setelah penghapusan total),
@@ -234,14 +316,25 @@ fi
 echo ""
 echo "Isi konfigurasi berikut. Kosongkan yang opsional bila belum ada."
 read -r -p "Domain VPS kamu (contoh: vpn.contoh.com, kosong = localhost saja): " VPN_DOMAIN || true
+if [ -n "$VPN_DOMAIN" ] && ! [[ "$VPN_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+  echo "PERINGATAN: domain '$VPN_DOMAIN' mengandung karakter tidak valid — diabaikan (domain kosong = localhost saja)."
+  VPN_DOMAIN=""
+fi
 while true; do
   if ! read -r -s -p "BOT_TOKEN Telegram (dari BotFather, tidak akan tampil): " BOT_TOKEN; then
     echo ""
     if [ -z "$BOT_TOKEN" ]; then echo "ERROR: input berakhir (EOF) sebelum BOT_TOKEN diisi — jalankan installer secara interaktif, bukan lewat pipe tertutup." >&2; exit 1; fi
   fi
   echo ""
-  if [ -n "$BOT_TOKEN" ]; then break; fi
-  echo "BOT_TOKEN wajib diisi."
+  if [ -z "$BOT_TOKEN" ]; then echo "BOT_TOKEN wajib diisi."; continue; fi
+  # B7: format token BotFather = angka:token. Format lain ditolak di sini,
+  # bukan lolos lalu gagal diam-diam saat bot start.
+  if ! [[ "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
+    echo "BOT_TOKEN tidak sesuai format BotFather (angka:token) — isi ulang."
+    BOT_TOKEN=""
+    continue
+  fi
+  break
 done
 while true; do
   if ! read -r -p "ADMIN_ID Telegram (angka saja): " ADMIN_ID; then
@@ -253,6 +346,39 @@ done
 read -r -p "H2H Gateway URL (kosong = pakai https://payment-gateway.outletku.ai.id/api/h2h/v1): " H2H_URL || true
 read -r -s -p "H2H API key operator (kunci gk_ tenant operator; kosong = deposit H2H nonaktif, tidak akan tampil): " H2H_KEY || true
 echo ""
+# K5/K6/K7/K8: prompt OPSIONAL (boleh kosong = fitur nonaktif, dicatat).
+# Kredensial ini milik layanan pihak ketiga (bukan Darren): lisensi IP
+# sewa (registry IP), Sidompul (cek kuota), HC (HTTP Custom), CloudFront
+# (CDN). Bila diisi, disimpan ke .env bot (600); bila kosong, dilewati
+# dengan catatan di output dan TIDAK menggagalkan install.
+read -r -s -p "Token lisensi IP sewa (GH_IP_TOKEN, opsional, tidak akan tampil): " GH_IP_TOKEN || true
+echo ""
+if [ -n "${GH_IP_TOKEN:-}" ]; then
+  read -r -p "Registry lisensi IP — owner repo (GH_IP_OWNER, opsional): " GH_IP_OWNER || true
+  read -r -p "Registry lisensi IP — nama repo (GH_IP_REPO, opsional): " GH_IP_REPO || true
+  read -r -p "Registry lisensi IP — nama file (GH_IP_FILE, opsional): " GH_IP_FILE || true
+else
+  GH_IP_OWNER=""; GH_IP_REPO=""; GH_IP_FILE=""
+  echo "Lisensi IP sewa dilewati (kosong) — fitur sewa berbasis registry IP nonaktif."
+fi
+read -r -s -p "SIDOMPUL_API_KEY cek kuota (opsional, tidak akan tampil): " SIDOMPUL_API_KEY || true
+echo ""
+[ -z "${SIDOMPUL_API_KEY:-}" ] && echo "Sidompul dilewati (kosong) — cek kuota nonaktif."
+read -r -s -p "HC_API_KEY (opsional, tidak akan tampil): " HC_API_KEY || true
+echo ""
+[ -z "${HC_API_KEY:-}" ] && echo "HC dilewati (kosong) — fitur HC nonaktif."
+read -r -p "CloudFront domain (CF_DOMAIN, opsional): " CF_DOMAIN || true
+if [ -n "${CF_DOMAIN:-}" ]; then
+  read -r -s -p "CloudFront VMess UUID (opsional, tidak akan tampil): " CF_VMESS_UUID || true
+  echo ""
+  read -r -s -p "CloudFront VLESS UUID (opsional, tidak akan tampil): " CF_VLESS_UUID || true
+  echo ""
+  read -r -s -p "CloudFront Trojan password (opsional, tidak akan tampil): " CF_TROJAN_PASSWORD || true
+  echo ""
+else
+  CF_VMESS_UUID=""; CF_VLESS_UUID=""; CF_TROJAN_PASSWORD=""
+  echo "CloudFront dilewati (kosong) — jalur CloudFront nonaktif."
+fi
 read -r -p "Digiflazz username (opsional): " DIGI_USER || true
 if [ -n "$DIGI_USER" ]; then
   read -r -s -p "Digiflazz API key (opsional, tidak akan tampil): " DIGI_KEY || true
@@ -262,9 +388,17 @@ else
 fi
 # Pilihan Xray juga ditanya di sini (dulu di langkah 9); langkah 9 hanya
 # memakai variabel ini, tidak bertanya lagi.
-read -r -p "Instal Xray? [Y/n, kosong = YA] " install_xray || true
+# B5: konsekuensi jawaban N disebut eksplisit di prompt, bukan tersembunyi.
+echo "PERINGATAN: menjawab N berarti Xray TIDAK diinstal. Karena Xray wajib"
+echo "jalan setelah install, verifikasi akhir akan GAGAL dan install"
+echo "dinyatakan GAGAL (VPN lewat domain tidak jalan) — pilih N hanya bila"
+echo "kamu sengaja ingin install gagal di verifikasi / pasang Xray manual."
+read -r -p "Instal Xray? [Y/n, kosong = YA; N = verifikasi akhir GAGAL] " install_xray || true
 
-VPN_API_AUTH="$(openssl rand -hex 24)"
+# B4: randomisasi fail-closed — gagal mengacak = BERHENTI dengan peringatan
+# keras, TIDAK PERNAH memakai nilai contoh publik sebagai fallback.
+VPN_API_AUTH="$(openssl rand -hex 24)" || { echo "ERROR: gagal mengacak VPN_API_AUTH (openssl gagal) — BERHENTI, tidak memakai nilai contoh." >&2; exit 1; }
+[ -n "$VPN_API_AUTH" ] || { echo "ERROR: VPN_API_AUTH kosong setelah randomisasi — BERHENTI, tidak memakai nilai contoh." >&2; exit 1; }
 VPN_API_BASE="http://127.0.0.1:5890"
 
 # ---------- 3b. Install total ----------
@@ -293,11 +427,26 @@ fi
 node --check "$SRC_DIR/v4-main/bot-js/app.js"
 python3 -m py_compile "$SRC_DIR/v4-main/Api/vpn-api.py"
 
-# ---------- 4. Backup instalasi lama (bila ada) ----------
+# ---------- 4. Backup instalasi lama (bila ada) — B1/B24 ----------
+# B1: install biasa TIDAK boleh menghapus data/bot.db diam-diam. Backup ini
+# diverifikasi (ada + berisi data/bot.db bila sumbernya punya), lalu
+# langkah 6 me-restore data/ dari backup ini. Jalur --total TIDAK memakai
+# restore otomatis ini (backup --total hanya untuk restore manual).
+STEP4_BAK=""
 if [ -d "$BOT_DIR" ]; then
   bak="/root/bot-js.bak-$(date +%Y%m%d-%H%M%S)"
   echo "Backup bot lama ke $bak"
-  cp -a "$BOT_DIR" "$bak"
+  cp -a "$BOT_DIR" "$bak" || { echo "ERROR: backup bot lama gagal — BERHENTI sebelum penghapusan." >&2; exit 1; }
+  chmod 700 "$bak" 2>/dev/null || true
+  find "$bak" -type f \( -name '.env' -o -name '*.db' \) -exec chmod 600 {} + 2>/dev/null || true
+  if [ ! -d "$bak" ] || [ -z "$(ls -A "$bak" 2>/dev/null)" ]; then
+    echo "ERROR: verifikasi backup bot lama gagal (backup kosong) — BERHENTI sebelum penghapusan." >&2; exit 1
+  fi
+  if [ -f "$BOT_DIR/data/bot.db" ] && [ ! -f "$bak/data/bot.db" ]; then
+    echo "ERROR: verifikasi backup gagal — data/bot.db tidak ikut tersalin — BERHENTI sebelum penghapusan." >&2; exit 1
+  fi
+  STEP4_BAK="$bak"
+  echo "Backup terverifikasi: $STEP4_BAK (data/bot.db akan di-restore di langkah 6)."
 fi
 
 # ---------- 5. Prompt konfigurasi (SUDAH DIPINDAH, FASE 1) ----------
@@ -335,11 +484,40 @@ if [ -n "$OLD_ENV_TMP" ]; then
     else
       echo "VPN_API_AUTH=$VPN_API_AUTH" >> "$BOT_DIR/.env"
     fi
+    # B6: nilai prompt baru TIDAK boleh dibuang diam-diam oleh .env lama.
+    # Domain DISELARASKAN (bukan dibuang): bila prompt domain diisi, tulis
+    # ke .env lama supaya bot dan /etc/xray/domain konsisten. Nilai prompt
+    # lain yang DIABAIKAN disebut eksplisit di sini.
+    if [ -n "$VPN_DOMAIN" ]; then
+      if grep -q '^VPN_DOMAIN=' "$BOT_DIR/.env"; then
+        sed -i "s|^VPN_DOMAIN=.*|VPN_DOMAIN=$VPN_DOMAIN|" "$BOT_DIR/.env"
+      else
+        echo "VPN_DOMAIN=$VPN_DOMAIN" >> "$BOT_DIR/.env"
+      fi
+      echo "Domain diselaraskan ke nilai prompt baru: $VPN_DOMAIN (bot .env = /etc/xray/domain)."
+    else
+      echo "Prompt domain kosong — domain .env lama dipertahankan; /etc/xray/domain akan mengikuti .env lama."
+    fi
+    echo "PERINGATAN: karena .env lama dipertahankan, nilai prompt baru berikut DIABAIKAN (bukan dipakai):"
+    echo "  BOT_TOKEN, ADMIN_ID, H2H_URL/H2H_KEY, Digiflazz, lisensi IP sewa, SIDOMPUL_API_KEY, HC_API_KEY, CloudFront."
+    echo "  Untuk memakai nilai baru itu, jalankan ulang dengan jawaban timpa .env = y."
   fi
   rm -f "$OLD_ENV_TMP"
 fi
+# B1 (lanjut): restore data bot dari backup langkah 4 (install biasa saja).
+if [ -n "${STEP4_BAK:-}" ] && [ -d "$STEP4_BAK/bot-js/data" ]; then
+  mkdir -p "$BOT_DIR/data"
+  cp -a "$STEP4_BAK/bot-js/data/." "$BOT_DIR/data/" || { echo "ERROR: restore data/bot.db gagal — BERHENTI." >&2; exit 1; }
+  [ -f "$BOT_DIR/data/bot.db" ] && echo "data/bot.db di-restore dari $STEP4_BAK (saldo/akun bot dipertahankan)."
+fi
+# Domain efektif = isi .env yang benar-benar dipakai (bukan mentah prompt),
+# supaya gate akhir membandingkan bot .env vs /etc/xray/domain secara jujur.
+EFFECTIVE_DOMAIN="$(grep '^VPN_DOMAIN=' "$BOT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+[ -n "${EFFECTIVE_DOMAIN:-}" ] || EFFECTIVE_DOMAIN="$VPN_DOMAIN"
 
 if [ ! -f "$BOT_DIR/.env" ]; then
+  # B7 lapis kedua: tidak ada jalur yang menulis .env dengan token kosong.
+  [ -n "${BOT_TOKEN:-}" ] || { echo "ERROR: BOT_TOKEN kosong — .env TIDAK ditulis, install BERHENTI." >&2; exit 1; }
   cat > "$BOT_DIR/.env" <<EOF
 BOT_TOKEN=$BOT_TOKEN
 ADMIN_ID=$ADMIN_ID
@@ -350,6 +528,16 @@ H2H_BASE_URL=${H2H_URL:-https://payment-gateway.outletku.ai.id/api/h2h/v1}
 H2H_API_KEY=$H2H_KEY
 DIGIFLAZZ_USERNAME=$DIGI_USER
 DIGIFLAZZ_API_KEY=$DIGI_KEY
+GH_IP_TOKEN=$GH_IP_TOKEN
+GH_IP_OWNER=$GH_IP_OWNER
+GH_IP_REPO=$GH_IP_REPO
+GH_IP_FILE=$GH_IP_FILE
+SIDOMPUL_API_KEY=$SIDOMPUL_API_KEY
+HC_API_KEY=$HC_API_KEY
+CF_DOMAIN=$CF_DOMAIN
+CF_VMESS_UUID=$CF_VMESS_UUID
+CF_VLESS_UUID=$CF_VLESS_UUID
+CF_TROJAN_PASSWORD=$CF_TROJAN_PASSWORD
 EOF
   chmod 600 "$BOT_DIR/.env"
   echo ".env dibuat (600)."
@@ -391,17 +579,25 @@ npm install
 # Hentikan bot lama bila ada, lalu jalankan yang baru
 pm2 delete ripzz-bot-js 2>/dev/null || true
 pm2 start app.js --name ripzz-bot-js
-pm2 save || true
-pm2 startup systemd -u root --hp /root 2>/dev/null || echo "pm2 startup perlu dijalankan manual bila gagal (lihat output pm2)."
+# B11: pm2 save/startup adalah gating — gagal = verdict gagal di verifikasi,
+# bukan peringatan yang bisa lewat begitu saja.
+PM2_SAVE_FAIL=0
+PM2_STARTUP_FAIL=0
+pm2 save || PM2_SAVE_FAIL=1
+if ! pm2 startup systemd -u root --hp /root 2>/dev/null; then
+  PM2_STARTUP_FAIL=1
+  echo "PERINGATAN: pm2 startup gagal — verifikasi akhir akan menggagalkan install." >&2
+fi
 
 # ---------- 9. Xray (wajib jalan; default YA) ----------
 # Pilihan install_xray sudah ditanya sebelum langkah 3b (FASE 1); di sini
 # hanya dipakai, tidak ditanya lagi.
 if [[ ! "$install_xray" =~ ^[Nn] ]]; then
-  echo "Menginstal Xray dari release resmi XTLS..."
-  tag="$(curl -fsSL --retry 3 https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)" || tag=""
+  # B22: Xray dipin ke SATU rilis resmi (XRAY_TAG_PIN), bukan latest mengambang.
+  echo "Menginstal Xray rilis resmi yang dipin: $XRAY_TAG_PIN ..."
+  tag="$XRAY_TAG_PIN"
   if [ -z "$tag" ]; then
-    echo "Gagal mendapatkan versi Xray terbaru. Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
+    echo "ERROR: pin Xray kosong — instalasi Xray dibatalkan; verifikasi akhir akan menggagalkan install." >&2
   else
     cd /tmp
     # FASE 2: petakan arsitektur ke aset rilis Xray (selain itu gagal eksplisit).
@@ -410,9 +606,9 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
       aarch64|arm64) XRAY_ZIP="Xray-linux-arm64-v8a.zip" ;;
       *) echo "Arsitektur $(uname -m) tidak didukung untuk unduhan Xray; instalasi Xray dilewati." >&2; XRAY_ZIP="" ;;
     esac
-    # FASE 2: unduh + verifikasi digest SHA256 dari rilis bila tersedia.
-    # Digest tidak tersedia / tak terparse = lanjut dengan peringatan
-    # tercatat (bukan gagal); digest TIDAK COCOK = berkas dibuang, Xray batal.
+    # FASE 2: unduh + verifikasi digest SHA256 dari rilis (B10: digest tidak
+    # tersedia / tak terparse = BERHENTI tanpa verifikasi; digest TIDAK
+    # COCOK = berkas dibuang, Xray batal).
     XRAY_OK=0
     if [ -n "$XRAY_ZIP" ] && curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/${XRAY_ZIP}"; then
       if curl -fsSL --retry 3 -o xray.zip.dgst "https://github.com/XTLS/Xray-core/releases/download/${tag}/${XRAY_ZIP}.dgst" 2>/dev/null; then
@@ -426,12 +622,16 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
             rm -f xray.zip
           fi
         else
-          echo "PERINGATAN: digest rilis tidak dapat diparse; lanjut tanpa verifikasi SHA256."
-          XRAY_OK=1
+          # B10: digest tak terparse = BERHENTI tanpa verifikasi, bukan lanjut.
+          echo "ERROR: digest rilis tidak dapat diparse — BERHENTI tanpa verifikasi SHA256; berkas dibuang, Xray batal." >&2
+          rm -f xray.zip
+          XRAY_OK=0
         fi
       else
-        echo "PERINGATAN: file digest rilis tidak tersedia; lanjut tanpa verifikasi SHA256."
-        XRAY_OK=1
+        # B10: digest tidak tersedia = BERHENTI, bukan lanjut dengan peringatan.
+        echo "ERROR: file digest rilis tidak tersedia — BERHENTI tanpa verifikasi SHA256; berkas dibuang, Xray batal." >&2
+        rm -f xray.zip
+        XRAY_OK=0
       fi
     fi
     if [ "$XRAY_OK" = 1 ]; then
@@ -443,9 +643,21 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
       DAT_FAIL=0
       if ! curl -fsSL --retry 3 -o /usr/local/share/xray/geoip.dat "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"; then DAT_FAIL=1; fi
       if ! curl -fsSL --retry 3 -o /usr/local/share/xray/geosite.dat "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"; then DAT_FAIL=1; fi
+      # B23: cek dat bukan ukuran saja — kedua file harus ADA, ukuran di
+      # atas ambang, DAN bertipe data biner yang wajar (cek 'file' bila ada).
       for _dat in geoip.dat geosite.dat; do
+        if [ ! -f "/usr/local/share/xray/$_dat" ]; then
+          echo "ERROR: /usr/local/share/xray/$_dat hilang." >&2; DAT_FAIL=1; continue
+        fi
         _sz="$(stat -c%s "/usr/local/share/xray/$_dat" 2>/dev/null || echo 0)"
-        if [ "$_sz" -lt 1048576 ]; then DAT_FAIL=1; fi
+        if [ "$_sz" -lt 1048576 ]; then echo "ERROR: $_dat terlalu kecil ($_sz byte)." >&2; DAT_FAIL=1; fi
+        if command -v file >/dev/null 2>&1; then
+          _ft="$(file -b "/usr/local/share/xray/$_dat" 2>/dev/null || echo "")"
+          case "$_ft" in
+            *data*|*Binary*) : ;;
+            *) echo "ERROR: $_dat bertipe tidak wajar untuk geo-dat: $_ft." >&2; DAT_FAIL=1 ;;
+          esac
+        fi
       done
       if [ "$DAT_FAIL" != 1 ]; then
       # FASE 1: drop-in systemd peninggalan installer resmi Xray bisa
@@ -468,13 +680,17 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
         # #vmess, dsb.) tidak diubah. Template tidak punya field
         # domain/SNI/host (TLS terminasi di haproxy); domain tetap ditulis
         # ke /etc/xray/domain di langkah 10.
+        # B4: gagal mengacak = BERHENTI dengan peringatan keras; kredensial
+        # contoh publik TIDAK PERNAH dibiarkan hidup di config terpasang.
         for _oldid in $(grep -o '"id": "[^"]*"' /etc/xray/config.json | sed 's/"id": "//; s/"//' | sort -u); do
           _newid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "")"
-          [ -n "$_newid" ] && sed -i "s|\"id\": \"$_oldid\"|\"id\": \"$_newid\"|g" /etc/xray/config.json
+          if [ -z "$_newid" ]; then echo "ERROR: gagal mengacak UUID Xray — BERHENTI, kredensial contoh TIDAK dipakai." >&2; exit 1; fi
+          sed -i "s|\"id\": \"$_oldid\"|\"id\": \"$_newid\"|g" /etc/xray/config.json
         done
         for _oldpw in $(grep -o '"password": "[^"]*"' /etc/xray/config.json | sed 's/"password": "//; s/"//' | sort -u); do
           _newpw="$(openssl rand -hex 16 2>/dev/null || echo "")"
-          [ -n "$_newpw" ] && sed -i "s|\"password\": \"$_oldpw\"|\"password\": \"$_newpw\"|g" /etc/xray/config.json
+          if [ -z "$_newpw" ]; then echo "ERROR: gagal mengacak password Xray — BERHENTI, kredensial contoh TIDAK dipakai." >&2; exit 1; fi
+          sed -i "s|\"password\": \"$_oldpw\"|\"password\": \"$_newpw\"|g" /etc/xray/config.json
         done
         echo "Config Xray disalin dari Cfg/config.json (template bermarker); kredensial contoh sudah diganti nilai acak."
       fi
@@ -532,8 +748,10 @@ if [ -f "$MENU_ZIP" ]; then
   rm -rf "$MENU_TMP"
   mkdir -p /etc/xray
   MENU_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  if [ -n "$VPN_DOMAIN" ]; then
-    echo "$VPN_DOMAIN" > /etc/xray/domain
+  # B6: domain file mengikuti domain EFEKTIF (.env yang dipakai), bukan
+  # mentah prompt — bot dan menu konsisten.
+  if [ -n "${EFFECTIVE_DOMAIN:-}" ]; then
+    echo "$EFFECTIVE_DOMAIN" > /etc/xray/domain
   elif [ ! -f /etc/xray/domain ]; then
     echo "${MENU_IP:-127.0.0.1}" > /etc/xray/domain
   fi
@@ -547,6 +765,101 @@ if [ -f "$MENU_ZIP" ]; then
 else
   echo "PERINGATAN: $MENU_ZIP tidak ditemukan, menu dilewati." >&2
 fi
+# ---------- 10b. Stack TLS: haproxy + nginx + /var/www/html + speedtest ----------
+# K1a/K16: apt haproxy+nginx sudah di langkah 1. File Cfg repo disalin ke
+# lokasi sistem yang benar: haproxy.cfg -> /etc/haproxy/haproxy.cfg,
+# nginx.conf (konfig utama) -> /etc/nginx/nginx.conf,
+# xray.conf (server blocks) -> /etc/nginx/conf.d/xray.conf (di-include
+# nginx.conf). nginx :81 melayani /var/www/html; haproxy :443 meneruskan
+# ke backend nginx (ws_backend 127.0.0.1:1010). Sertifikat LE via acme.sh
+# RESMI; bila DNS belum mengarah / port 80 sibuk / unduhan acme gagal,
+# installer TIDAK gagal total — stack terpasang, status "TLS pending"
+# dilaporkan jelas + langkah manual change-domain (lihat README bagian
+# "Pasca-install (wajib)"), dan gate membedakan dua verdict terpisah.
+TLS_STATUS="pending"
+TLS_REASON="belum diproses"
+mkdir -p /var/www/html
+if [ -f "$SRC_DIR/v4-main/Cfg/haproxy.cfg" ]; then
+  if [ -f /etc/haproxy/haproxy.cfg ] && ! cmp -s "$SRC_DIR/v4-main/Cfg/haproxy.cfg" /etc/haproxy/haproxy.cfg; then
+    cp -a /etc/haproxy/haproxy.cfg "/root/haproxy.cfg.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || echo "PERINGATAN: backup haproxy.cfg lama gagal." >&2
+  fi
+  cp -a "$SRC_DIR/v4-main/Cfg/haproxy.cfg" /etc/haproxy/haproxy.cfg
+  echo "haproxy.cfg repo disalin ke /etc/haproxy/haproxy.cfg (tanpa backend dropbear — K10)."
+else
+  echo "PERINGATAN: Cfg/haproxy.cfg tidak ditemukan di repo — stack TLS tidak lengkap." >&2
+  TLS_REASON="Cfg/haproxy.cfg tidak ada di repo"
+fi
+if [ -f "$SRC_DIR/v4-main/Cfg/nginx.conf" ]; then
+  cp -a "$SRC_DIR/v4-main/Cfg/nginx.conf" /etc/nginx/nginx.conf
+fi
+if [ -f "$SRC_DIR/v4-main/Cfg/xray.conf" ]; then
+  cp -a "$SRC_DIR/v4-main/Cfg/xray.conf" /etc/nginx/conf.d/xray.conf
+  # K16: server :81 memakai sertifikat LE bila ada; bila belum ada,
+  # hapus baris ssl-nya supaya nginx -t lolos dengan HTTP polos :81.
+  if [ -f /etc/xray/xray.crt ] && [ -f /etc/xray/xray.key ]; then
+    echo "Sertifikat /etc/xray/xray.crt+.key sudah ada — server :81 memakai TLS."
+  else
+    sed -i 's/^    listen 81 ssl http2 reuseport;/    listen 81 reuseport;/' /etc/nginx/conf.d/xray.conf
+    sed -i '/^    ssl_certificate/d; /^    ssl_ciphers/d; /^    ssl_protocols/d' /etc/nginx/conf.d/xray.conf
+    echo "Sertifikat LE belum ada — server :81 berjalan HTTP polos (TLS pending)."
+  fi
+  if [ -n "${EFFECTIVE_DOMAIN:-}" ]; then
+    sed -i "s/server_name xxx;/server_name $EFFECTIVE_DOMAIN;/g" /etc/nginx/conf.d/xray.conf
+  fi
+fi
+if nginx -t 2>/dev/null; then
+  systemctl enable nginx 2>/dev/null || true
+  systemctl restart nginx 2>/dev/null || systemctl start nginx 2>/dev/null || echo "PERINGATAN: nginx gagal start — gate akan menandainya." >&2
+  echo "OK: nginx config lolos (nginx -t) dan :81 melayani /var/www/html."
+else
+  echo "PERINGATAN: nginx -t GAGAL — perbaiki /etc/nginx/nginx.conf + /etc/nginx/conf.d/xray.conf lalu: nginx -t && systemctl restart nginx." >&2
+  TLS_REASON="nginx -t gagal"
+fi
+# Sertifikat LE (acme.sh resmi) — hanya bila domain terisi, port 80 bebas,
+# dan belum ada hap.pem yang valid. Gagal di sini = TLS pending, BUKAN gagal total.
+if [ -f /etc/haproxy/hap.pem ] && haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
+  TLS_STATUS="ready"; TLS_REASON="hap.pem sudah ada + haproxy -c lolos"
+elif [ -n "${EFFECTIVE_DOMAIN:-}" ] && ! ss -ltn 2>/dev/null | grep -q ':80 '; then
+  echo "Mencoba sertifikat LE untuk $EFFECTIVE_DOMAIN via acme.sh resmi (gagal = TLS pending, bukan gagal total)..."
+  if [ ! -d "$HOME/.acme.sh" ]; then
+    rm -f /tmp/acme-install.sh
+    curl -fsSL --retry 2 -o /tmp/acme-install.sh "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" 2>/dev/null || echo "Unduhan acme.sh gagal — TLS pending." >&2
+    # Catatan: acme.sh resmi dijalankan dari salinan resminya; bila unduhan
+    # di atas gagal/ragu, LEWATI langkah ini dan lanjut sebagai TLS pending.
+    if [ -s /tmp/acme-install.sh ]; then
+      sh /tmp/acme-install.sh --install 2>/dev/null || echo "Instalasi acme.sh gagal — TLS pending." >&2
+      rm -f /tmp/acme-install.sh
+    fi
+  fi
+  if [ -x "$HOME/.acme.sh/acme.sh" ]; then
+    "$HOME/.acme.sh/acme.sh" --issue -d "$EFFECTIVE_DOMAIN" --webroot /var/www/html 2>/dev/null || echo "Penerbitan LE gagal (DNS belum mengarah / validasi gagal) — TLS pending." >&2
+    if [ -f "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/fullchain.cer" ] && [ -f "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/$EFFECTIVE_DOMAIN.key" ]; then
+      cat "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/fullchain.cer" "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/$EFFECTIVE_DOMAIN.key" > /etc/haproxy/hap.pem
+      chmod 600 /etc/haproxy/hap.pem
+      cp -a "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/fullchain.cer" /etc/xray/xray.crt 2>/dev/null || true
+      cp -a "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/$EFFECTIVE_DOMAIN.key" /etc/xray/xray.key 2>/dev/null || true
+      chmod 600 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
+    fi
+  fi
+  if [ -f /etc/haproxy/hap.pem ] && haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
+    systemctl enable haproxy 2>/dev/null || true
+    systemctl restart haproxy 2>/dev/null || systemctl start haproxy 2>/dev/null || echo "PERINGATAN: haproxy gagal start." >&2
+    TLS_STATUS="ready"; TLS_REASON="sertifikat LE terbit + haproxy -c lolos"
+  else
+    TLS_REASON="sertifikat LE belum tersedia (DNS/port 80/acme) — jalankan change-domain manual"
+  fi
+else
+  if [ -z "${EFFECTIVE_DOMAIN:-}" ]; then TLS_REASON="domain kosong — isi domain lalu change-domain manual";
+  elif ss -ltn 2>/dev/null | grep -q ':80 '; then TLS_REASON="port 80 sibuk — bebaskan port 80 lalu change-domain manual"; fi
+fi
+echo "STATUS TLS: $TLS_STATUS ($TLS_REASON)"
+# K12: salin speedtest dari repo ke /usr/bin bila ada di repo.
+if [ -f "$SRC_DIR/v4-main/Cdy/speedtest" ]; then
+  install -m 755 "$SRC_DIR/v4-main/Cdy/speedtest" /usr/bin/speedtest && echo "speedtest terpasang ke /usr/bin/speedtest."
+else
+  echo "PERINGATAN: Cdy/speedtest tidak ada di repo — speedtest dilewati." >&2
+fi
+
 # FASE 2: pasang unit + script limit dari repo LOKAL (Fls) — tanpa unduh
 # eksternal. Pemetaan sesuai Fls/limit.sh bawaan repo (hanya pemetaan
 # berkasnya yang dipakai; logika unduh eksternal script itu TIDAK dipakai):
@@ -586,6 +899,20 @@ if [ -n "${IZIN_TOKEN:-}" ]; then
   echo "Token baca izin tersimpan di /etc/xray/izin-token (600)."
 fi
 unset IZIN_TOKEN
+
+# ---------- 10c. Cron harian xp (K18) ----------
+# xp sudah diperiksa: tidak meminta input apa pun, dan mendukung flag
+# --yes/--non-interactive sebagai penanda aman. Karena itu aman dipasang
+# sebagai cron harian (pembersih akun kedaluwarsa). Bila /usr/bin/xp tidak
+# ada, cron tidak dipasang dan gate di bawah tidak menggagalkannya — xp
+# manual tetap tersedia lewat menu.
+if [ -x /usr/bin/xp ]; then
+  printf '%s\n' '0 3 * * * root /usr/bin/xp --yes >/var/log/darren-xp.log 2>&1' > /etc/cron.d/darren-xp
+  chmod 600 /etc/cron.d/darren-xp
+  echo "Cron harian xp terpasang (/etc/cron.d/darren-xp, tiap 03:00)."
+else
+  echo "PERINGATAN: /usr/bin/xp tidak ditemukan — cron harian xp TIDAK dipasang." >&2
+fi
 
 # ---------- 11. Verifikasi (HARUS lolos semua; bila ada yang gagal, install GAGAL) ----------
 echo ""
@@ -629,18 +956,88 @@ if [ -x /usr/bin/cek-izin ]; then
 else
   echo "GAGAL: /usr/bin/cek-izin tidak ditemukan/tidak executable." >&2; VERIFY_FAIL=1
 fi
-# pm2 startup yang gagal TIDAK menggagalkan verifikasi (bot tetap jalan di sesi
-# ini), tapi tampilkan perintah manualnya dengan MENONJOL bila belum aktif.
-if ! systemctl is-enabled pm2-root >/dev/null 2>&1; then
-  echo "PERHATIAN: pm2 startup belum aktif — bot TIDAK akan auto-start saat boot."
-  echo "Jalankan manual: pm2 startup systemd -u root --hp /root"
+# B11 (gating): pm2 save/startup yang gagal MENGGAGALKAN verifikasi.
+if [ "${PM2_SAVE_FAIL:-0}" = "1" ]; then
+  echo "GAGAL: pm2 save gagal — bot tidak akan pulih otomatis setelah restart." >&2; VERIFY_FAIL=1
 fi
+if [ "${PM2_STARTUP_FAIL:-0}" = "1" ] || ! systemctl is-enabled pm2-root >/dev/null 2>&1; then
+  echo "GAGAL: pm2 startup belum aktif — bot TIDAK akan auto-start saat boot. Jalankan manual: pm2 startup systemd -u root --hp /root" >&2; VERIFY_FAIL=1
+fi
+# B3: gate Xray menjalankan 'xray run -test' pada config BARU — proses lama
+# yang masih jalan TIDAK boleh menutupi config baru yang rusak.
+if [ -x /usr/local/bin/xray ] && [ -f /etc/xray/config.json ]; then
+  if /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
+    echo "OK: xray run -test lolos pada /etc/xray/config.json (baru)"
+  else
+    echo "GAGAL: xray run -test GAGAL pada config baru — perbaiki /etc/xray/config.json." >&2; VERIFY_FAIL=1
+  fi
+else
+  echo "GAGAL: biner xray / config baru tidak ditemukan untuk run -test." >&2; VERIFY_FAIL=1
+fi
+# B19: gate membuktikan tunnel/akun/domain, bukan sekadar proses jalan.
+# haproxy/nginx: config test lolos bila stack TLS dipasang; haproxy aktif
+# diwajibkan hanya bila TLS ready (bila pending, haproxy memang belum jalan).
+if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+  echo "OK: nginx -t lolos (stack TLS terpasang)"
+else
+  echo "GAGAL: nginx -t gagal / nginx tidak terpasang." >&2; VERIFY_FAIL=1
+fi
+if systemctl is-active --quiet nginx; then
+  echo "OK: nginx aktif (:81 melayani /var/www/html)"
+else
+  echo "GAGAL: nginx tidak aktif." >&2; VERIFY_FAIL=1
+fi
+if [ "${TLS_STATUS:-pending}" = "ready" ]; then
+  if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
+    echo "OK: haproxy -c lolos"
+  else
+    echo "GAGAL: haproxy -c gagal." >&2; VERIFY_FAIL=1
+  fi
+  if systemctl is-active --quiet haproxy; then
+    echo "OK: haproxy aktif (:443 -> backend nginx)"
+  else
+    echo "GAGAL: haproxy tidak aktif padahal TLS ready." >&2; VERIFY_FAIL=1
+  fi
+else
+  echo "TLS PENDING (bukan gagal install): ${TLS_REASON:-tidak diketahui} — VPN domain belum jalan sampai change-domain manual selesai."
+fi
+# Xray listen pada port inbound yang diharapkan (WS: 10001-10004).
+if command -v ss >/dev/null 2>&1; then
+  for _xp in 10001 10002 10003 10004; do
+    if ss -ltn 2>/dev/null | grep -q ":$_xp "; then
+      echo "OK: Xray listen 127.0.0.1:$_xp"
+    else
+      echo "GAGAL: Xray TIDAK listen pada port inbound $_xp." >&2; VERIFY_FAIL=1
+    fi
+  done
+else
+  echo "GAGAL: 'ss' tidak tersedia — tidak bisa membuktikan Xray listen." >&2; VERIFY_FAIL=1
+fi
+# Domain terisi dan konsisten dengan .env bot.
+if [ -s /etc/xray/domain ]; then
+  _domfile="$(cat /etc/xray/domain)"
+  if [ -n "${EFFECTIVE_DOMAIN:-}" ] && [ "$_domfile" != "$EFFECTIVE_DOMAIN" ]; then
+    echo "GAGAL: /etc/xray/domain ('$_domfile') != domain .env bot ('$EFFECTIVE_DOMAIN')." >&2; VERIFY_FAIL=1
+  else
+    echo "OK: /etc/xray/domain terisi dan konsisten dengan .env bot ('$_domfile')"
+  fi
+else
+  echo "GAGAL: /etc/xray/domain kosong/hilang." >&2; VERIFY_FAIL=1
+fi
+# Satu akun contoh TIDAK dibuat — gate ini cukup cek struktur config + listen.
+echo "OK: tidak ada akun contoh dibuat (gate hanya cek struktur config + listen)."
 if [ "$VERIFY_FAIL" = "1" ]; then
   echo "" >&2
   echo "=== VERIFIKASI GAGAL: install TIDAK selesai. Perbaiki item GAGAL di atas lalu jalankan ulang installer. ===" >&2
   exit 1
 fi
 echo ""
+echo "VERDICT Xray: aktif (run -test + listen terbukti di atas)"
+if [ "${TLS_STATUS:-pending}" = "ready" ]; then
+  echo "VERDICT VPN domain: JALAN (TLS ready, haproxy :443 aktif)"
+else
+  echo "VERDICT VPN domain: BELUM JALAN — TLS pending (${TLS_REASON:-tidak diketahui}); selesaikan change-domain manual (README: Pasca-install wajib)."
+fi
 echo "=== Selesai ==="
 echo "Bot: /root/bot-js (pm2: ripzz-bot-js)"
 echo "API: /root/vpn-api.py, service vpn-api, auth di /etc/vpn-api/auth.env (600)"

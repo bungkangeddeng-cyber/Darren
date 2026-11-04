@@ -5,17 +5,25 @@ diperbaiki dari audit bug statis 2026-11-01. Lihat `BUGS-v4-main.md`
 untuk daftar bug asli, dan `v4-main/CHANGELOG-FIXED.md` untuk daftar
 perbaikan yang sudah diterapkan.
 
+Versi installer: `fix-total-20261104-01` — penanda yang bisa di-grep
+di header `install.sh` (`DARREN_INSTALLER_VERSION`). Bila isi
+`install.sh` yang terunduh belum menyebut penanda itu, berarti cache
+GitHub belum segar — tunggu beberapa menit lalu unduh ulang.
+
 ## Instalasi di VPS baru (sebagai root)
 
 Repo ini saat ini PUBLIK; migrasi ke private + token masih rencana,
 bukan fakta. Setelah repo di-private-kan oleh owner (rencana),
 setiap install butuh token baca dari HP owner: GitHub -> token
 read-only khusus repo Darren, masa berlaku pendek (buat token baru
-per install). Token yang sama dipakai di perintah unduh dan saat
-installer meminta (atau lewat env `GH_TOKEN`).
+per install). Token dipakai lewat env/prompt saat installer meminta —
+JANGAN pernah menempel nilai token di perintah curl, chat, atau log
+(nilai token di shell history = token bocor). Pola aman bila repo
+sudah private: baca token ke variabel lewat prompt tersembunyi,
+lalu pakai referensi variabel di header curl (bukan nilainya).
 
 ```bash
-curl -fsSL -H "Authorization: Bearer ISI_TOKEN_DARI_HP" https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
 chmod +x install.sh
 ./install.sh
 ```
@@ -40,11 +48,12 @@ menghapus total.
 
 ## Uninstall total (sebagai root)
 
-Repo ini private, jadi unduh uninstaller juga butuh token baca
-dari HP owner (sama seperti install):
+Repo ini saat ini PUBLIK, jadi unduh uninstaller tidak butuh token.
+Bila repo sudah di-private-kan (rencana), pakai pola aman yang sama
+seperti install (token lewat variabel prompt, bukan nilai di perintah):
 
 ```bash
-curl -fsSL -H "Authorization: Bearer ISI_TOKEN_DARI_HP" https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/uninstall.sh -o uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/uninstall.sh -o uninstall.sh
 chmod +x uninstall.sh
 ./uninstall.sh
 ```
@@ -87,11 +96,11 @@ satu baris di file itu lalu push; menu membaca file itu dari GitHub
 auditnya ada di `/var/log/izin.log` di VPS. Jangan taruh secret
 di file ini.
 
-Karena repo private, `cek-izin` membaca allowlist memakai token
+Selama repo masih publik, `cek-izin` jalan tanpa token. Setelah repo
+di-private-kan (rencana), `cek-izin` membaca allowlist memakai token
 baca yang tersimpan di `/etc/xray/izin-token` (mode 600, hanya
-root). Tanpa token, cek-izin mencoba tanpa autentikasi (jalan
-selama repo masih publik, gagal setelah repo private — pesannya
-menyebut token). VPS yang sudah terpasang sebelum repo private
+root). Tanpa token setelah private, cek-izin gagal dengan pesan
+yang menyebut token. VPS yang sudah terpasang sebelum repo private
 tidak perlu install ulang; cukup pasang tokennya (input
 tersembunyi, tidak tampil saat diketik):
 
@@ -119,6 +128,103 @@ menu server itu berhenti setelah cache habis).
   branch ini, digantikan folder `v4-main/` yang sudah diperbaiki.
   Riwayat git lama masih berisi zip lama; membersihkan riwayat
   adalah langkah force-push terpisah yang butuh persetujuan pemilik.
+
+## Stack TLS (haproxy + nginx) — dipasang installer
+
+Installer memasang `haproxy` + `nginx` (plus `at` dan `iproute2`),
+menyalin file `Cfg` repo ke lokasi sistem yang benar
+(`haproxy.cfg` -> `/etc/haproxy/haproxy.cfg`,
+`nginx.conf` -> `/etc/nginx/nginx.conf`,
+`xray.conf` -> `/etc/nginx/conf.d/xray.conf`),
+membuat `/var/www/html`, dan mengatur nginx `:81` melayani direktori
+itu serta haproxy `:443` meneruskan ke backend nginx (WS `127.0.0.1:1010`).
+Backend dropbear sudah dihapus dari `haproxy.cfg` (tidak ada fitur
+yang memakainya; dropbear tidak diinstal).
+
+Sertifikat Let's Encrypt diusahakan via acme.sh resmi. Bila DNS belum
+mengarah, port 80 sibuk, atau unduhan/penerbitan acme gagal, installer
+TIDAK gagal total: stack tetap terpasang, nginx `:81` berjalan HTTP
+polos, dan status dilaporkan jelas sebagai **TLS pending**. Gate akhir
+membedakan dua verdict terpisah: "Xray aktif" vs "VPN domain jalan".
+Bila verdict kedua masih TLS pending, selesaikan langkah manual di
+bagian "Pasca-install (wajib)" — jangan klaim VPN domain sudah jalan.
+
+Xray dipin ke SATU rilis resmi `v26.10.31` (konstanta `XRAY_TAG_PIN`
+di `install.sh`, bukan latest mengambang) dan digest SHA256 rilisnya
+wajib lolos — digest tak tersedia/tak terparse = instalasi Xray
+BERHENTI, bukan lanjut tanpa verifikasi.
+
+## Kredensial opsional (layanan pihak ketiga)
+
+Installer mem-prompt OPSIONAL (boleh kosong = fitur nonaktif, tidak
+menggagalkan install) dan menyimpannya ke `.env` bot (600) bila diisi:
+
+- Lisensi IP sewa (`GH_IP_TOKEN` + `GH_IP_OWNER`/`GH_IP_REPO`/`GH_IP_FILE`)
+  — registry IP untuk fitur sewa, dioperasikan di luar VPS.
+- `SIDOMPUL_API_KEY` — layanan cek kuota pihak ketiga.
+- `HC_API_KEY` — layanan HTTP Custom pihak ketiga.
+- CloudFront (`CF_DOMAIN`, `CF_VMESS_UUID`, `CF_VLESS_UUID`,
+  `CF_TROJAN_PASSWORD`) — CDN pihak ketiga; UUID/password diteruskan
+  ke origin sesuai setup server.
+
+Semua itu BUKAN layanan Darren; kredensialnya milik penyedia
+pihak ketiga tersebut, dan kekosongannya hanya menonaktifkan fitur
+yang bersangkutan. `speedtest` disalin dari `v4-main/Cdy/` ke
+`/usr/bin/speedtest` bila ada di repo, dan dihapus uninstaller.
+
+Dependensi bot-js dipin lewat `v4-main/bot-js/package-lock.json`
+(lockfile dibuat dari dependensi yang tercantum di `package.json`;
+verifikasi `npm install`/`npm ci` di VPS live — termasuk build native
+`sqlite3` — masih wajib saat tes live, lockfile ini belum diklaim
+teruji end-to-end).
+
+## Pasca-install (wajib)
+
+Setelah installer selesai, SEMUA langkah manual yang tersisa ini
+masih harus dikerjakan — installer tidak mengklaimnya sudah beres:
+
+1. **TLS pending / change-domain.** Bila verdict "VPN domain" masih
+   TLS pending: pastikan DNS domain sudah mengarah ke IP VPS,
+   bebaskan port 80, lalu jalankan `change-domain` dari menu dan
+   pastikan sertifikat terbit + haproxy `:443` aktif. Ulangi gate
+   (nginx `-t`, haproxy `-c`, Xray listen) sampai verdict domain JALAN.
+2. **Kredensial opsional.** Bila saat install dikosongkan tapi
+   fiturnya dibutuhkan, isi lisensi IP sewa, `SIDOMPUL_API_KEY`,
+   `HC_API_KEY`, dan variabel CloudFront (lihat atas), lalu restart
+   bot. Kredensial pihak ketiga tidak pernah ditulis di repo/chat/log.
+3. **SlowDNS / Noobz / Zivpn manual.** Ketiga stack itu TIDAK
+   dipasang installer ini — pasang manual dari menu/script terkait
+   bila dibutuhkan, dan uji masing-masing sebelum jualan.
+4. **Sync PPOB + margin.** Jalankan Sync PPOB (Digiflazz) dulu,
+   lalu set margin penjualan sebelum jualan — harga jual = modal +
+   margin; margin yang belum diset berarti harga jual = modal.
+5. **GH_TOKEN.** Token baca repo (bila repo sudah private) dibuat
+   baru per install dari HP owner, masa berlaku pendek; jangan
+   dipakai ulang lintas install dan jangan disimpan di file.
+6. **Izin-token.** Token baca izin menu dipasang ke
+   `/etc/xray/izin-token` (600) — wajib setelah repo private;
+   tanpa itu menu berhenti membaca allowlist setelah cache habis.
+7. **Uji live.** Trial di bot, satu akun tiap protokol, dan satu
+   pembayaran nominal kecil sebelum jualan (lihat laporan fix-total
+   untuk daftar yang masih butuh tes live).
+
+## Dead code (hanya didokumentasikan, TIDAK dihapus)
+
+Dari sudut installer, berikut ini tidak dipanggil/dipasang installer
+— didokumentasikan saja, tidak dihapus, karena menu runtime mungkin
+masih merujuk sebagian di antaranya (perlu verifikasi live sebelum
+penghapusan apa pun):
+
+- `v4-main/BotVPN2/` — bot lama, tidak diinstal secara default.
+- `v4-main/Fls/` selain unit/script limit yang dipasang installer
+  (limitvmess/vless/trojan/shadowsocks) — mis. `ws`, `openvpn`,
+  `udp-mini`, `socks`, `sshd`, `nameserver` tidak dipasang installer.
+- `v4-main/Cfg/slowdns.sh`, `v4-main/noobzvpn-install.sh`,
+  `v4-main/udp.sh`, `v4-main/cf.sh`, `v4-main/fix-*.sh`,
+  `v4-main/update*.sh` — script legacy/manual, bukan bagian installer.
+- `v4-main/Bot/` dan `v4-main/Vpn/` — tree lama yang tidak disalin
+  installer (yang disalin: `bot-js` + `Api/vpn-api.py` + `Cdy/menu.zip`
+  + `Fls` limit + `Cfg` TLS/Xray).
 
 ## Struktur
 
