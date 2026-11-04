@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261104-02
+# DARREN_INSTALLER_VERSION=fix-total-20261104-03
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
@@ -29,7 +29,7 @@ set -euo pipefail
 # script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # B15: penanda versi (grep DARREN_INSTALLER_VERSION).
-DARREN_INSTALLER_VERSION="fix-total-20261104-02"
+DARREN_INSTALLER_VERSION="fix-total-20261104-03"
 # B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
 # rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
 # ubah konstanta ini + README, lalu uji live ulang.
@@ -505,14 +505,17 @@ if [ -n "$OLD_ENV_TMP" ]; then
   rm -f "$OLD_ENV_TMP"
 fi
 # B1 (lanjut): restore data bot dari backup langkah 4 (install biasa saja).
-if [ -n "${STEP4_BAK:-}" ] && [ -d "$STEP4_BAK/bot-js/data" ]; then
+if [ -n "${STEP4_BAK:-}" ] && [ -d "$STEP4_BAK/data" ]; then
   mkdir -p "$BOT_DIR/data"
-  cp -a "$STEP4_BAK/bot-js/data/." "$BOT_DIR/data/" || { echo "ERROR: restore data/bot.db gagal — BERHENTI." >&2; exit 1; }
+  cp -a "$STEP4_BAK/data/." "$BOT_DIR/data/" || { echo "ERROR: restore data/bot.db gagal — BERHENTI." >&2; exit 1; }
   [ -f "$BOT_DIR/data/bot.db" ] && echo "data/bot.db di-restore dari $STEP4_BAK (saldo/akun bot dipertahankan)."
 fi
 # Domain efektif = isi .env yang benar-benar dipakai (bukan mentah prompt),
 # supaya gate akhir membandingkan bot .env vs /etc/xray/domain secara jujur.
-EFFECTIVE_DOMAIN="$(grep '^VPN_DOMAIN=' "$BOT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+# .env baru belum ditulis saat baris ini jalan (install segar tanpa .env
+# lama) — grep yang gagal harus jatuh ke fallback prompt di bawah, bukan
+# mati kena trap ERR lewat pipefail.
+EFFECTIVE_DOMAIN="$(grep '^VPN_DOMAIN=' "$BOT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 [ -n "${EFFECTIVE_DOMAIN:-}" ] || EFFECTIVE_DOMAIN="$VPN_DOMAIN"
 
 if [ ! -f "$BOT_DIR/.env" ]; then
