@@ -50,6 +50,15 @@ async function init() {
   await run(`ALTER TABLE vpn_accounts ADD COLUMN server_id INTEGER DEFAULT 0`).catch(() => {});
   await run(`ALTER TABLE servers ADD COLUMN api_base TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE servers ADD COLUMN api_auth TEXT DEFAULT ''`).catch(() => {});
+  // Status aktif server (gerbang kesehatan model bot-baru): hanya server
+  // active=1 yang ditawarkan di pilih-server beli/trial. Kolom ini baru;
+  // pada DB lama, ALTER berhasil -> aktifkan server yang sudah ada
+  // (sebelumnya semua server langsung ditawarkan tanpa status).
+  // Pada DB baru, CREATE TABLE di bawah sudah memuat kolom ini sehingga
+  // ALTER gagal (ditangkap) dan tidak ada grandfathering (belum ada server).
+  await run(`ALTER TABLE servers ADD COLUMN active INTEGER DEFAULT 0`).then(async () => {
+    await run(`UPDATE servers SET active = 1 WHERE api_base IS NOT NULL AND api_base != ''`).catch(() => {});
+  }).catch(() => {});
   // Batas klaim trial 1x/24 jam per telegram_id, terpisah dari vpn_accounts
   // (baris akun dihapus saat trial habis, jadi batas tidak boleh dicek dari sana).
   await run(`CREATE TABLE IF NOT EXISTS trial_claims (
@@ -71,15 +80,6 @@ async function init() {
   await run(`ALTER TABLE transactions ADD COLUMN sku TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE transactions ADD COLUMN gateway TEXT DEFAULT 'gopay'`).catch(() => {});
 
-  // Konfigurasi Pakasir (payment link QRIS/VA) — diatur admin via panel bot
-  await run(`CREATE TABLE IF NOT EXISTS pakasir_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    slug TEXT DEFAULT '',
-    api_key TEXT DEFAULT '',
-    enabled INTEGER DEFAULT 0
-  )`);
-  await run(`INSERT OR IGNORE INTO pakasir_config (id, slug, api_key, enabled) VALUES (1, '', '', 0)`);
-
   await run(`CREATE TABLE IF NOT EXISTS notified_expired (
     account_id INTEGER PRIMARY KEY,
     notified_at TEXT DEFAULT (datetime('now'))
@@ -91,7 +91,8 @@ async function init() {
     domain TEXT DEFAULT '',
     harga INTEGER DEFAULT 500,
     api_base TEXT DEFAULT '',
-    api_auth TEXT DEFAULT ''
+    api_auth TEXT DEFAULT '',
+    active INTEGER DEFAULT 0
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS bonus_config (

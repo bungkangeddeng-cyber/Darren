@@ -37,8 +37,11 @@ async function getServer(id) {
   return get('SELECT * FROM servers WHERE id = ?', [sid]).catch(() => null);
 }
 async function listBuyServers() {
-  // Hanya server dengan api_base terisi yang bisa dipakai membuat akun.
-  return all("SELECT * FROM servers WHERE api_base IS NOT NULL AND api_base != '' ORDER BY id").catch(() => []);
+  // Hanya server AKTIF (health check lolos saat didaftarkan) dengan
+  // api_base terisi yang bisa dipakai membuat akun. Bila kolom active
+  // belum ada (DB sangat lama / migrasi gagal), query error -> [] sehingga
+  // pemilih server disembunyikan dan alur jatuh ke server utama (aman).
+  return all("SELECT * FROM servers WHERE active = 1 AND api_base IS NOT NULL AND api_base != '' ORDER BY id").catch(() => []);
 }
 
 
@@ -364,11 +367,14 @@ async function recordTrialClaim(telegramId) {
 }
 async function sweepExpiredTrials() {
   const rows = await all(
-    `SELECT proto, username FROM vpn_accounts WHERE is_trial = 1 AND trial_expires_at IS NOT NULL AND trial_expires_at < datetime('now')`
+    `SELECT proto, username, server_id FROM vpn_accounts WHERE is_trial = 1 AND trial_expires_at IS NOT NULL AND trial_expires_at < datetime('now')`
   ).catch(() => []);
   let deleted = 0;
   for (const r of rows) {
-    try { const res = await deleteAccount(r.proto, r.username); if (res && res.success) deleted++; } catch {}
+    // Hapus lewat API server yang sama dengan tempat trial dibuat
+    // (sebelumnya sweeper selalu lewat server utama sehingga trial di
+    // server terdaftar tidak pernah mati di server itu).
+    try { const srv = await getServer(r.server_id).catch(() => null); const res = await deleteAccount(r.proto, r.username, srv); if (res && res.success) deleted++; } catch {}
   }
   return deleted;
 }
@@ -535,6 +541,6 @@ module.exports = {
   countAccounts,
   createSSH, cfSSHInfo, createVMess, createVLess, createTrojan, createShadowsocks, createZivpn, fancyBox,
   renewAccount, deleteAccount, saveAccount, myAccounts, validUser, expiryDate,
-  canClaimTrial, recordTrialClaim, sweepExpiredTrials, trialExpiresAtISO, getServer, listBuyServers,
+  canClaimTrial, recordTrialClaim, sweepExpiredTrials, trialExpiresAtISO, getServer, listBuyServers, dispDomain,
   VPN_PRODUCTS, DEFAULT_VPN_PRICE, seedVpnPrices, getVpnPrice, setVpnPrice, listVpnPrices,
 };

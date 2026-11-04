@@ -20,6 +20,7 @@ const GROUP_WAJIB = ''; // Grup wajib diatur via panel admin; kosong = tidak ada
 const GROUP_NOTIF = ''; // ID grup notifikasi diatur via panel admin; kosong = notifikasi grup nonaktif
 const { init: initDb } = require('./src/db');
 const vpn = require('./modules/vpn');
+const srvTools = require('./modules/servers');
 const ppob = require('./modules/ppob');
 const h2h = require('./src/h2h');
 const kuota = require('./modules/kuota');
@@ -145,7 +146,7 @@ const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('💵 Tambah Saldo', 'adm_addsaldo', 'success'), sBtn('➖ Kurangi Saldo', 'adm_minsaldo', 'danger')],
   [sBtn('📊 Hasil Penjualan', 'adm_sales', 'primary'), sBtn('📑 Log Topup', 'adm_topuplog', 'primary')],
   [sBtn('📦 Backup DB', 'adm_backupdb', 'success'), sBtn('♻️ Restore DB', 'adm_restoredb', 'danger')],
-  [sBtn('🧾 Setting Pakasir', 'adm_pakasir', 'primary'), sBtn('🎁 Bonus & Reseller', 'adm_bonus', 'success')],
+  [sBtn('🎁 Bonus & Reseller', 'adm_bonus', 'success')],
   [sBtn('💰 Min. Deposit/Role', 'adm_mindep', 'primary'), sBtn('📈 Margin PPOB', 'adm_margin', 'success')],
   [sBtn('📊 Jumlah Akun', 'adm_akun', 'primary')],
   [sBtn('📢 Broadcast Grup', 'adm_bcast', 'primary'), sBtn('📣 Broadcast User', 'adm_bcastuser', 'primary')],
@@ -389,8 +390,9 @@ const PROTO_LABEL = { ssh: 'SSH', vmess: 'VMess', vless: 'VLess', trojan: 'Troja
 
 async function handleCreate(ctx, proto, viaCF) {
   const chatId = ctx.chat.id;
-  // Pilih server dulu bila ada server terdaftar dengan api_base;
-  // bila tidak ada, langsung ke input username (perilaku lama).
+  // Pilih server dulu bila ada server AKTIF terdaftar (health check
+  // lolos saat didaftarkan); bila tidak ada, langsung ke input username
+  // (server utama, perilaku lama).
   const servers = await vpn.listBuyServers().catch(() => []);
   if (servers.length) {
     sessions.set(chatId, { pendingProto: proto, pendingCf: viaCF });
@@ -460,6 +462,18 @@ async function trialProtoPick(ctx, proto, viaCF) {
   if (!(await vpn.canClaimTrial(ctx.from.id).catch(() => false))) {
     return ctx.reply('❌ Kamu sudah klaim trial dalam 24 jam terakhir. Coba lagi besok.');
   }
+  // Pilih server dulu bila ada server AKTIF terdaftar (seperti alur beli);
+  // bila tidak ada, langsung ke input username (server utama, perilaku lama).
+  const trialServers = await vpn.listBuyServers().catch(() => []);
+  if (trialServers.length) {
+    sessions.set(ctx.chat.id, { pendingTrialProto: proto, pendingTrialCf: viaCF });
+    const rows = [[sBtn(`🏠 Server Utama (${config.vpn.domain})`, 'trial_srv_0', 'primary')]];
+    for (const sv of trialServers) rows.push([sBtn(`🌐 ${sv.nama} (${sv.domain})`, `trial_srv_${sv.id}`, 'success')]);
+    rows.push([sBtn('🔙 Kembali', 'menu_main', 'danger')]);
+    await ctx.reply('🌐 <b>Pilih Server</b>\n\nTrial akan dibuat di server yang kamu pilih:', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard(rows) });
+    await safeCb(ctx);
+    return;
+  }
   sessions.set(ctx.chat.id, { step: 'vpn_username', proto, viaCF, isTrial: true });
   await ctx.reply(
     `🎁 <b>Trial ${PROTO_LABEL[proto]}${viaCF ? ' (CloudFront)' : ''} — Gratis 1 Jam</b>\n\n` +
@@ -470,12 +484,29 @@ async function trialProtoPick(ctx, proto, viaCF) {
 bot.action(/^trial_proto_(.+)$/, (ctx) => trialProtoPick(ctx, ctx.match[1], false));
 bot.action(/^cf_trial_proto_(.+)$/, (ctx) => trialProtoPick(ctx, ctx.match[1], true));
 
+// ---------- Pilih server saat trial (lanjut ke input username) ----------
+bot.action(/^trial_srv_(\d+)$/, async (ctx) => {
+  await safeCb(ctx);
+  const sess = sessions.get(ctx.chat.id);
+  if (!sess?.pendingTrialProto) return ctx.reply('❌ Sesi trial tidak ditemukan. Ulangi dari menu.');
+  const proto = sess.pendingTrialProto;
+  const viaCF = !!sess.pendingTrialCf;
+  const serverId = Number(ctx.match[1]);
+  sessions.set(ctx.chat.id, { step: 'vpn_username', proto, viaCF, isTrial: true, serverId });
+  await ctx.reply(
+    `🎁 <b>Trial ${PROTO_LABEL[proto]}${viaCF ? ' (CloudFront)' : ''} — Gratis 1 Jam</b>\n\n` +
+      `Kirim <b>username</b> (3-20 karakter, huruf/angka):`,
+    { parse_mode: 'HTML', ...cancelKb() }
+  );
+});
+
 // Buat akun trial: tanpa cek/potong saldo, exp=1 ke API (BUKAN 0 —
 // exp=0 di API dibaca jadi 30 hari), masa trial 1 jam dicatat di
 // trial_expires_at dan ditegakkan sweeper, bukan kolom tanggal expiry.
 async function finishTrialVpn(ctx, sess, username, password = '') {
   sessions.delete(ctx.chat.id);
-  const { proto, viaCF } = sess;
+  const { proto, viaCF, serverId } = sess;
+  const srv = await vpn.getServer(serverId).catch(() => null);
   if (!(await vpn.canClaimTrial(ctx.from.id).catch(() => false))) {
     return ctx.reply('❌ Kamu sudah klaim trial dalam 24 jam terakhir. Coba lagi besok.');
   }
@@ -484,20 +515,20 @@ async function finishTrialVpn(ctx, sess, username, password = '') {
   try {
     if (proto === 'ssh') {
       r = viaCF ? vpn.cfSSHInfo(username, password, 1)
-        : await vpn.createSSH(username, password, 1, 1);
-      if (viaCF && r.success) await vpn.createSSH(username, password, 1, 1).catch(() => {});
-    } else if (proto === 'vmess') r = await vpn.createVMess(username, 1, viaCF);
-    else if (proto === 'vless') r = await vpn.createVLess(username, 1, viaCF);
-    else if (proto === 'shadowsocks') r = await vpn.createShadowsocks(username, 1, viaCF);
-    else if (proto === 'zivpn') r = await vpn.createZivpn(username, password, 1);
-    else r = await vpn.createTrojan(username, 1, viaCF);
+        : await vpn.createSSH(username, password, 1, 1, srv);
+      if (viaCF && r.success) await vpn.createSSH(username, password, 1, 1, srv).catch(() => {});
+    } else if (proto === 'vmess') r = await vpn.createVMess(username, 1, viaCF, srv);
+    else if (proto === 'vless') r = await vpn.createVLess(username, 1, viaCF, srv);
+    else if (proto === 'shadowsocks') r = await vpn.createShadowsocks(username, 1, viaCF, srv);
+    else if (proto === 'zivpn') r = await vpn.createZivpn(username, password, 1, srv);
+    else r = await vpn.createTrojan(username, 1, viaCF, srv);
   } catch (e) {
     r = { success: false, message: `❌ Error: ${esc(e.message)}` };
   }
   if (!r.success) return ctx.reply(r.message, { parse_mode: 'HTML' });
   const trialEnd = vpn.trialExpiresAtISO();
   await vpn.recordTrialClaim(ctx.from.id);
-  await vpn.saveAccount(ctx.from.id, proto, username, r.expiry, 1, viaCF ? 1 : 0, trialEnd);
+  await vpn.saveAccount(ctx.from.id, proto, username, r.expiry, 1, viaCF ? 1 : 0, trialEnd, serverId || 0);
   notifGrup(bot, `🎁 <b>Trial VPN</b>\n👤 ${ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name}\n📦 ${proto.toUpperCase()}${viaCF ? ' (CF)' : ''} - 1 jam (gratis)`);
   // Pesan trial menampilkan JAM berakhir (WIB), bukan tanggal expiry.
   const endWib = new Date(Date.now() + 3600 * 1000 + 7 * 3600 * 1000);
@@ -510,7 +541,7 @@ async function finishTrialVpn(ctx, sess, username, password = '') {
     hcCache.set(cacheKey, {
       proto, username,
       uuid: r.uuid || '', password: r.password || '',
-      domain: viaCF ? config.cloudfront.domain : config.vpn.domain,
+      domain: viaCF ? config.cloudfront.domain : vpn.dispDomain(srv),
     });
     if (hcCache.size > 100) hcCache.delete(hcCache.keys().next().value);
     extra.reply_markup = { inline_keyboard: [[{ text: '📱 Download .hc', callback_data: 'hc_dl_' + cacheKey }]] };
@@ -528,33 +559,6 @@ bot.on('text', async (ctx) => {
     sessions.delete(chatId);
     await ctx.reply('❌ <b>Dibatalkan.</b>', { parse_mode: 'HTML' });
     return goMainMenu(ctx);
-  }
-
-  // --- Session input slug Pakasir ---
-  if (sess?.step === 'adm_pakasir_slug') {
-    const slug = ctx.message.text.trim();
-    sessions.delete(chatId);
-    if (!slug) return ctx.reply('❌ Slug tidak boleh kosong.');
-    const c = await pakasir.getConfig();
-    await pakasir.setConfig(slug, c.api_key);
-    // Hapus pesan berisi slug dari chat demi keamanan? Tidak — slug bersifat publik.
-    return ctx.reply(`✅ Slug Pakasir disimpan: <code>${esc(slug)}</code>`, {
-      parse_mode: 'HTML', reply_markup: adminPanel().reply_markup,
-    });
-  }
-
-  // --- Session input API key Pakasir ---
-  if (sess?.step === 'adm_pakasir_key') {
-    const apiKey = ctx.message.text.trim();
-    sessions.delete(chatId);
-    if (!apiKey) return ctx.reply('❌ API key tidak boleh kosong.');
-    const c = await pakasir.getConfig();
-    await pakasir.setConfig(c.slug, apiKey);
-    // Hapus pesan berisi API key dari chat demi keamanan
-    try { await ctx.deleteMessage(ctx.message.message_id); } catch (_) {}
-    return ctx.reply(`✅ API key Pakasir disimpan (<code>${pakasir.maskKey(apiKey)}</code>).`, {
-      parse_mode: 'HTML', reply_markup: adminPanel().reply_markup,
-    });
   }
 
   // --- Session input API key ePro ---
@@ -1051,7 +1055,7 @@ bot.on('text', async (ctx) => {
     if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
     sess.data.domain = domain;
     sess.step = 'adm_addserver_api';
-    return ctx.reply(`➕ <b>Tambah Server</b>\n\nNama: <b>${esc(sess.data.nama)}</b>\nDomain: <code>${esc(domain)}</code>\n\nKetik <b>API base server</b> (contoh: http://127.0.0.1:5888 atau https://api.server.com):`, { parse_mode: 'HTML' });
+    return ctx.reply(`➕ <b>Tambah Server</b>\n\nNama: <b>${esc(sess.data.nama)}</b>\nDomain: <code>${esc(domain)}</code>\n\nKetik <b>API base server</b> (contoh: http://1.2.3.4:5890 atau https://api.server.com):`, { parse_mode: 'HTML' });
   }
 
   // Tambah server: api_base
@@ -1073,17 +1077,30 @@ bot.on('text', async (ctx) => {
     return ctx.reply(`➕ <b>Tambah Server</b>\n\nNama: <b>${esc(sess.data.nama)}</b>\nDomain: <code>${esc(sess.data.domain)}</code>\nAPI: <code>${esc(sess.data.api_base)}</code>\n🔑 Key: <b>${sess.data.api_auth ? 'terisi' : 'kosong (tanpa auth)'}</b>\n\nKetik <b>harga per hari</b> (angka saja, contoh: 500):`, { parse_mode: 'HTML' });
   }
 
-  // Tambah server: harga -> simpan
+  // Tambah server: harga -> health check -> simpan (hanya bila sehat)
   if (sess?.step === 'adm_addserver_harga') {
     const harga = parseInt(ctx.message.text.replace(/\D/g, ''), 10);
     if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
     if (!harga || harga < 0) return ctx.reply('❌ Harga tidak valid. Ketik angka saja (contoh: 500):');
+    const d = sess.data;
+    const apiBase = srvTools.normalizeApiBase(d.api_base);
+    // Gerbang kesehatan (model bot-baru): API server itu HARUS menjawab
+    // /health dengan status success SEBELUM server diaktifkan. Gagal =
+    // tidak disimpan sama sekali (bukan disimpan lalu nonaktif).
+    const health = await srvTools.checkServerHealth(apiBase).catch(() => ({ ok: false, message: 'Health check gagal (error internal).' }));
+    if (!health.ok) {
+      sessions.delete(chatId);
+      return ctx.reply(
+        `❌ <b>Server TIDAK ditambahkan — health check gagal.</b>\n\n📝 Nama: <b>${esc(d.nama)}</b>\n🌐 Domain: <code>${esc(d.domain)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n\nAlasan: ${esc(health.message)}\n\nServer tidak diaktifkan. Perbaiki api_base / server itu, lalu ulangi dari ➕ Tambah Server.`,
+        { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      );
+    }
     const { run } = require('./src/db');
-    const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga) VALUES (?,?,?,?,?)',
-      [sess.data.nama, sess.data.domain, sess.data.api_base, sess.data.api_auth || '', harga]);
+    const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, active) VALUES (?,?,?,?,?,1)',
+      [d.nama, d.domain, apiBase, d.api_auth || '', harga]);
     sessions.delete(chatId);
     return ctx.reply(
-      `✅ <b>Server ditambahkan!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(sess.data.nama)}</b>\n🌐 Domain: <code>${esc(sess.data.domain)}</code>\n🔌 API: <code>${esc(sess.data.api_base)}</code>\n🔑 Key: <b>${sess.data.api_auth ? 'terisi' : 'kosong (tanpa auth)'}</b>\n💲 Harga: <b>Rp${harga.toLocaleString('id-ID')}/hari</b>`,
+      `✅ <b>Server ditambahkan!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🌐 Domain: <code>${esc(d.domain)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>${d.api_auth ? 'terisi' : 'kosong (tanpa auth)'}</b>\n💲 Harga: <b>Rp${harga.toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>`,
       { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
     );
   }
@@ -1241,21 +1258,7 @@ bot.on('text', async (ctx) => {
         { parse_mode: 'HTML' }
       );
     }
-    // Jika Pakasir aktif → user pilih metode bayar dulu
-    const pakasirReady = await pakasir.isReady().catch(() => false);
-    if (pakasirReady) {
-      sessions.set(chatId, { step: 'deposit_method', nominal });
-      const kb = Markup.inlineKeyboard([
-        [sBtn('💳 GoPay QRIS', 'dep_method_gopay', 'primary')],
-        [sBtn('🧾 Pakasir (QRIS/VA)', 'dep_method_pakasir', 'success')],
-        [sBtn('❌ Batal', 'menu_ppob', 'danger')],
-      ]);
-      return ctx.reply(
-        `💰 <b>Deposit ${digi.rp(nominal)}</b>\n\nPilih metode pembayaran:`,
-        { parse_mode: 'HTML', reply_markup: kb.reply_markup }
-      );
-    }
-    // Pakasir belum aktif → langsung GoPay seperti sebelumnya
+    // Deposit hanya lewat GoPay QRIS (H2H milik sendiri) — tanpa pilih metode.
     sessions.delete(chatId);
     await ctx.reply('⏳ Membuat QRIS...');
     const r = await ppob.createDeposit(ctx.from.id, nominal);
@@ -1881,83 +1884,6 @@ bot.action('ppob_deposit', async (ctx) => {
   await ctx.reply(`💰 Kirim <b>nominal deposit</b> ${minDepTxt}:${bonusTxt}`, { parse_mode: 'HTML', ...cancelKb() });
 });
 
-// User pilih metode deposit: GoPay QRIS (gateway sendiri)
-bot.action('dep_method_gopay', async (ctx) => {
-  await safeCb(ctx);
-  const sess = sessions.get(ctx.chat.id);
-  const nominal = sess?.nominal;
-  sessions.delete(ctx.chat.id);
-  if (!nominal) return ctx.reply('❌ Sesi kedaluwarsa, ulangi dari menu deposit.');
-  await ctx.reply('⏳ Membuat QRIS...');
-  const r = await ppob.createDeposit(ctx.from.id, nominal);
-  if (!r.success) return ctx.reply(r.message);
-  const caption = `💳 <b>Deposit ${digi.rp(nominal)}</b>\nRef: <code>${r.ref}</code>\n\nScan QRIS di atas untuk bayar. Saldo masuk otomatis setelah pembayaran terdeteksi.\n⏰ QRIS berlaku 5 menit.`;
-  if (r.qrBuffer) return ctx.replyWithPhoto({ source: r.qrBuffer }, { caption, parse_mode: 'HTML' });
-  return ctx.reply(caption + `\n${r.qrUrl || ''}`, { parse_mode: 'HTML' });
-});
-
-// User pilih metode deposit: Pakasir (QRIS/VA via pakasir.com)
-bot.action('dep_method_pakasir', async (ctx) => {
-  await safeCb(ctx);
-  const sess = sessions.get(ctx.chat.id);
-  const nominal = sess?.nominal;
-  sessions.delete(ctx.chat.id);
-  if (!nominal) return ctx.reply('❌ Sesi kedaluwarsa, ulangi dari menu deposit.');
-  await ctx.reply('⏳ Membuat link pembayaran Pakasir...');
-  const ref = ppob.refId('PKR');
-  try {
-    const p = await pakasir.createPayment(nominal, ref, 'qris');
-    const { run } = require('./src/db');
-    await run(
-      `INSERT INTO transactions (telegram_id, type, amount, ref_id, payment_id, status, gateway)
-       VALUES (?,?,?,?,?,?,?)`,
-      [ctx.from.id, 'deposit', nominal, ref, p.orderId, 'pending', 'pakasir']
-    );
-    // QR dari QRIS string (pakai API QR publik)
-    const qrImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(p.paymentNumber || p.paymentUrl)}`;
-    const caption =
-      `🧾 <b>Deposit via Pakasir ${digi.rp(nominal)}</b>\n` +
-      `Ref: <code>${ref}</code>\n\n` +
-      `Scan QR atau buka link bayar:\n${p.paymentUrl}\n\n` +
-      `Saldo masuk otomatis setelah pembayaran terdeteksi.`;
-    const kb = Markup.inlineKeyboard([
-      [Markup.button.url('🔗 Buka Link Bayar', p.paymentUrl)],
-      [sBtn('🔄 Cek Status', `dep_pkcheck_${ref}`, 'primary')],
-    ]);
-    // Pakai URL button bila valid, fallback ke tombol cek status saja
-    try {
-      await ctx.replyWithPhoto(qrImgUrl, { caption, parse_mode: 'HTML', reply_markup: kb.reply_markup });
-    } catch (_) {
-      await ctx.reply(caption, { parse_mode: 'HTML', reply_markup: kb.reply_markup });
-    }
-  } catch (e) {
-    return ctx.reply(`❌ Gagal membuat pembayaran Pakasir: ${esc(e.message)}`);
-  }
-});
-
-// Cek status manual deposit Pakasir
-bot.action(/^dep_pkcheck_(.+)$/, async (ctx) => {
-  await safeCb(ctx);
-  const ref = ctx.match[1];
-  const { get } = require('./src/db');
-  const tx = await get(
-    `SELECT amount, payment_id, status FROM transactions WHERE ref_id = ? AND gateway = 'pakasir'`,
-    [ref]
-  ).catch(() => null);
-  if (!tx) return ctx.reply('❌ Transaksi tidak ditemukan.');
-  if (tx.status !== 'pending') return ctx.reply(`ℹ️ Status transaksi: <b>${esc(tx.status)}</b>`, { parse_mode: 'HTML' });
-  try {
-    const s = await pakasir.checkStatus(tx.payment_id, tx.amount);
-    if (s.status === 'completed') {
-      return ctx.reply('✅ Pembayaran terdeteksi lunas! Saldo akan masuk otomatis (tunggu polling).');
-    }
-    const label = { pending: 'menunggu pembayaran', cancelled: 'dibatalkan', expired: 'kedaluwarsa' }[s.status] || s.status;
-    return ctx.reply(`⏳ Status: <b>${label}</b>.`, { parse_mode: 'HTML' });
-  } catch (e) {
-    return ctx.reply(`❌ Gagal cek status: ${esc(e.message)}`);
-  }
-});
-
 // Tampilkan daftar produk PPOB (dipakai tombol Beli & Daftar Produk)
 // Bila kategori memakai layer provider dan belum pilih provider → tampilkan pilih provider dulu
 async function showProductList(ctx, group, page = 1) {
@@ -2194,9 +2120,36 @@ bot.action(/^adm_delserver_(\d+)$/, async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
   const id = parseInt(ctx.match[1], 10);
-  const { run } = require('./src/db');
+  // Server utama (default, id 0/null) bukan baris tabel — tidak bisa dihapus.
+  if (!id) return ctx.reply('❌ Server utama (default) tidak bisa dihapus.');
+  const { get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  await ctx.reply(
+    `❌ <b>Hapus Server?</b>\n\n📝 <b>${esc(s.nama)}</b> (ID <code>${s.id}</code>)\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n\nAkun yang masih terdaftar di server ini TIDAK ikut terhapus otomatis. Tindakan ini tidak bisa dibatalkan.`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[sBtn('✅ Ya, hapus', `adm_delserver_yes_${id}`, 'danger'), sBtn('🔙 Batal', 'adm_back', 'primary')]] },
+    }
+  );
+});
+
+bot.action(/^adm_delserver_yes_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  if (!id) return ctx.reply('❌ Server utama (default) tidak bisa dihapus.');
+  const { run, get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  // Tolak hapus bila masih ada akun yang merujuk server ini — kalau tidak,
+  // renew/hapus akun itu nanti salah rute (jatuh ke server utama).
+  const refs = await get('SELECT COUNT(*) AS n FROM vpn_accounts WHERE server_id = ?', [id]).catch(() => ({ n: 0 }));
+  if (refs && refs.n > 0) {
+    return ctx.reply(`❌ Server <b>${esc(s.nama)}</b> masih dipakai <b>${refs.n} akun</b>. Hapus akun itu dulu, baru hapus server.`, { parse_mode: 'HTML' });
+  }
   const r = await run('DELETE FROM servers WHERE id = ?', [id]);
-  await ctx.reply(r.changes > 0 ? `✅ Server ID <code>${id}</code> dihapus.` : '⚠️ Server tidak ditemukan.', { parse_mode: 'HTML' });
+  await ctx.reply(r.changes > 0 ? `✅ Server <b>${esc(s.nama)}</b> (ID <code>${id}</code>) dihapus.` : '⚠️ Server tidak ditemukan.', { parse_mode: 'HTML' });
 });
 
 // Edit harga: pilih server -> ketik harga baru dari keyboard
@@ -2327,7 +2280,7 @@ bot.action('adm_listserver', async (ctx) => {
   const rows = await getServers();
   if (!rows.length) return ctx.reply('❌ Belum ada server. Tambah dulu via ➕ Tambah Server.');
   const lines = rows.map((s, i) =>
-    `${i + 1}. <b>${esc(s.nama)}</b>\n   🆔 ID: <code>${s.id}</code>\n   🌐 Domain: <code>${esc(s.domain || '-')}</code>\n   🔌 API: <code>${esc(s.api_base || '-')}</code>\n   🔑 Key: <b>${s.api_auth ? 'terisi' : 'kosong'}</b>\n   💲 Harga: <b>Rp${Number(s.harga).toLocaleString('id-ID')}/hari</b>`
+    `${i + 1}. <b>${esc(s.nama)}</b>\n   🆔 ID: <code>${s.id}</code>\n   🌐 Domain: <code>${esc(s.domain || '-')}</code>\n   🔌 API: <code>${esc(s.api_base || '-')}</code>\n   🔑 Key: <b>${s.api_auth ? 'terisi' : 'kosong'}</b>\n   💲 Harga: <b>Rp${Number(s.harga).toLocaleString('id-ID')}/hari</b>\n   ${Number(s.active) === 1 ? '🟢' : '🔴'} Status: <b>${Number(s.active) === 1 ? 'AKTIF' : 'NONAKTIF'}</b>`
   );
   await ctx.reply(`📋 <b>Daftar Server (${rows.length})</b>\n\n${lines.join('\n\n')}`, {
     parse_mode: 'HTML',
@@ -2584,67 +2537,6 @@ bot.action('adm_restoredb', async (ctx) => {
     { parse_mode: 'HTML' }
   );
   sessions.set(ctx.chat.id, { step: 'restore_db' });
-});
-
-// ---------- Setting Pakasir ----------
-const pakasir = require('./modules/pakasir');
-
-async function showPakasirPanel(ctx) {
-  const c = await pakasir.getConfig();
-  const status = c.enabled && c.slug && c.api_key ? '🟢 Aktif' : (c.slug && c.api_key ? '🟡 Terisi (nonaktif)' : '🔴 Belum dikonfigurasi');
-  const text =
-    `🧾 <b>Setting Pakasir</b>\n\n` +
-    `Status: <b>${status}</b>\n` +
-    `🔗 Slug: <code>${esc(c.slug || '(kosong)')}</code>\n` +
-    `🔑 API Key: <code>${pakasir.maskKey(c.api_key)}</code>\n\n` +
-    `Pakasir = metode bayar kedua (selain GoPay QRIS).\n` +
-    `User bisa pilih saat deposit bila sudah aktif.`;
-  const kb = Markup.inlineKeyboard([
-    [sBtn('🔗 Set Slug', 'adm_pakasir_slug', 'primary'), sBtn('🔑 Set API Key', 'adm_pakasir_key', 'primary')],
-    [sBtn('🧪 Tes Koneksi', 'adm_pakasir_test', 'success'), sBtn(c.enabled ? '⏸️ Nonaktifkan' : '▶️ Aktifkan', 'adm_pakasir_toggle', c.enabled ? 'danger' : 'success')],
-    [sBtn('🔙 Kembali', 'adm_open', 'danger')],
-  ]);
-  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb.reply_markup });
-}
-
-bot.action('adm_pakasir', async (ctx) => {
-  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
-  await safeCb(ctx);
-  await showPakasirPanel(ctx);
-});
-
-bot.action('adm_pakasir_slug', async (ctx) => {
-  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
-  await safeCb(ctx);
-  sessions.set(ctx.chat.id, { step: 'adm_pakasir_slug' });
-  await ctx.reply('🔗 Kirim <b>slug project Pakasir</b> (lihat di halaman detail project pakasir.com):', { parse_mode: 'HTML', ...cancelKb() });
-});
-
-bot.action('adm_pakasir_key', async (ctx) => {
-  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
-  await safeCb(ctx);
-  sessions.set(ctx.chat.id, { step: 'adm_pakasir_key' });
-  await ctx.reply('🔑 Kirim <b>API key Pakasir</b> (lihat di halaman detail project pakasir.com):', { parse_mode: 'HTML', ...cancelKb() });
-});
-
-bot.action('adm_pakasir_test', async (ctx) => {
-  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
-  await safeCb(ctx);
-  await ctx.reply('⏳ Mengetes koneksi ke Pakasir...');
-  const r = await pakasir.testConnection();
-  await ctx.reply(r.message, { parse_mode: 'HTML' });
-});
-
-bot.action('adm_pakasir_toggle', async (ctx) => {
-  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
-  await safeCb(ctx);
-  const c = await pakasir.getConfig();
-  if (!c.slug || !c.api_key) {
-    return ctx.reply('❌ Isi slug & API key dulu sebelum mengaktifkan.');
-  }
-  await pakasir.setEnabled(!c.enabled);
-  await ctx.reply(`✅ Pakasir ${!c.enabled ? '<b>diaktifkan</b>' : '<b>dinonaktifkan</b>'}.`, { parse_mode: 'HTML' });
-  await showPakasirPanel(ctx);
 });
 
 // ============================================================
@@ -3162,7 +3054,7 @@ sweepTrialsOnce();
 // ---------- Poller deposit QRIS: kredit saldo otomatis tiap 30 detik ----------
 // Deposit yang sudah dibayar di gateway (status paid/success/settled/completed)
 // dikreditkan ke saldo user. Klaim atomik: hanya transaksi yang masih 'pending'
-// yang diproses. Mendukung 2 gateway: h2h (GoPay H2H milik sendiri) & pakasir.
+// yang diproses. Hanya gateway h2h (GoPay H2H milik sendiri) yang dipoller.
 // Baris deposit gateway lama (P2P, gateway='gopay') TIDAK lagi dipoller sejak
 // rombak H2H — baris itu menggantung sampai jendela 7 hari habis; selesaikan
 // manual bila masih ada saat deploy.
@@ -3175,29 +3067,11 @@ setInterval(async () => {
          AND created_at > datetime('now','-7 days')`
     ).catch(() => []);
     if (!pending.length) return;
-    const pakasirReady = await pakasir.isReady().catch(() => false);
     for (const tx of pending) {
       try {
         const gw = tx.gateway || 'gopay';
         let isPaid = false;
-        if (gw === 'pakasir') {
-          if (!pakasirReady) continue;
-          const s = await pakasir.checkStatus(tx.payment_id, tx.amount).catch(() => null);
-          if (!s) continue;
-          if (s.status === 'completed') {
-            const paidAmt = s.raw?.amount ?? s.raw?.total ?? null;
-            if (paidAmt != null && Math.abs(Number(paidAmt) - Number(tx.amount)) > 1000) {
-              console.error('[deposit] nominal pakasir tidak cocok, tidak dikreditkan:', tx.ref_id);
-              continue;
-            }
-            isPaid = true;
-          }
-          else if (s.status === 'expired' || s.status === 'cancelled') {
-            await run(`UPDATE transactions SET status = ? WHERE ref_id = ? AND status = 'pending'`,
-              [s.status, tx.ref_id]);
-            continue;
-          } else continue; // masih pending
-        } else if (gw === 'h2h') {
+        if (gw === 'h2h') {
           const st = await h2h.getQrisStatus(tx.payment_id).catch(() => ({ ok: false }));
           if (!st.ok) continue; // gateway tak menjawab; coba putaran berikutnya
           if (h2h.isPaidStatus(st.status)) {
