@@ -37,7 +37,8 @@ for arg in "$@"; do
     --help|-h)
       echo "Pakai: ./install.sh [--total]"
       echo "  --total   Install total: backup lalu hapus semua instalasi SC lama,"
-      echo "            baru install baru (token bot + admin diminta ulang)."
+      echo "            termasuk Node/PM2/vnstat, baru install baru (token bot +"
+      echo "            admin diminta ulang; Node/PM2 dipasang lagi dari nol)."
       echo "  Tanpa --total, bila instalasi lama ditemukan installer akan bertanya"
       echo "  dulu sebelum menghapus total."
       echo "  Token GitHub: set GH_TOKEN=... atau isi prompt (token baca repo,"
@@ -94,27 +95,28 @@ git_clone_darren() {
 }
 
 # Hapus total instalasi SC lama (dipakai mode --total / jawaban y).
-# TIDAK menghapus: node/npm/pm2, backup yang baru dibuat, dan SRC_DIR
-# (sudah berisi source baru saat fungsi ini dipanggil).
+# SATU SUMBER KEBENARAN: daftar hapus ada di hapus_stack_darren() di
+# uninstall.sh (repo root) — fungsi ini hanya memanggilnya, BUKAN salinan
+# daftar kedua. Mengubah daftar hapus = ubah uninstall.sh saja.
+# Perbedaan yang disengaja vs uninstall mandiri:
+#  - backup SUDAH dibuat siapkan_install_total (ke darren-reinstall-backup-*),
+#    jadi fungsi hapus tidak membackup lagi;
+#  - /root/darren-install TIDAK dihapus (argumen keep-src), karena source
+#    baru sudah ada di sana dan masih dibutuhkan langkah install berikut;
+#  - Node/PM2/vnstat ikut dihapus (seperti uninstall mandiri); siapkan
+#    memasangnya lagi lewat pasang_node_pm2 di akhir (langkah 8 butuh
+#    npm/pm2, dan node --check butuh node — keduanya jalan SETELAH total).
 hapus_instalasi_lama() {
   command -v unzip >/dev/null 2>&1 || apt-get install -y unzip 2>/dev/null || true
-  pm2 delete ripzz-bot-js 2>/dev/null || true
-  pm2 save 2>/dev/null || true
-  systemctl disable --now vpn-api 2>/dev/null || true
-  systemctl disable --now xray 2>/dev/null || true
-  rm -f /etc/systemd/system/vpn-api.service /etc/systemd/system/xray.service
-  systemctl daemon-reload 2>/dev/null || true
-  if [ -f "$SRC_DIR/v4-main/Cdy/menu.zip" ]; then
-    unzip -Z1 "$SRC_DIR/v4-main/Cdy/menu.zip" 2>/dev/null | while IFS= read -r f; do
-      case "$f" in
-        */) continue ;;
-        *) rm -f "/usr/bin/$(basename "$f")" ;;
-      esac
-    done
+  if [ ! -f "$SRC_DIR/uninstall.sh" ]; then
+    echo "ERROR: $SRC_DIR/uninstall.sh tidak ditemukan — hapus total dibatalkan (instalasi lama TIDAK dihapus)." >&2
+    exit 1
   fi
-  rm -f /usr/bin/menu /usr/bin/ipsave /usr/bin/cek-izin /var/log/izin.log
-  rm -rf /tmp/menu-baru
-  rm -rf /root/bot-js /root/vpn-api.py /etc/vpn-api /usr/local/bin/xray /etc/xray /tmp/xray.zip /tmp/xray-bin
+  bash -n "$SRC_DIR/uninstall.sh" || { echo "ERROR: $SRC_DIR/uninstall.sh gagal cek sintaks — hapus total dibatalkan." >&2; exit 1; }
+  # shellcheck disable=SC1091
+  source "$SRC_DIR/uninstall.sh"
+  echo "Menghapus stack Darren lama (termasuk Node/PM2/vnstat) ..."
+  hapus_stack_darren keep-src
 }
 
 # Siapkan install total: backup dulu, ambil source baru (gagal = batal,
@@ -142,6 +144,10 @@ siapkan_install_total() {
   echo "Menghapus total instalasi SC lama ..."
   hapus_instalasi_lama
   echo "Instalasi lama sudah dihapus total (backup di $backup)."
+  # Hapus total ikut menghapus Node/PM2 (lihat hapus_stack_darren) —
+  # pasang lagi sekarang, sebelum node --check dan langkah 8 (npm/pm2).
+  pasang_node_pm2
+  echo "Node/PM2 dipasang lagi setelah hapus total."
 }
 
 echo "=== v4-main fixed installer ==="
@@ -154,25 +160,33 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg unzip git python3 sqlite3 openssl
 
-# ---------- 2. Node.js >= 18 ----------
-need_node=0
-if ! command -v node >/dev/null 2>&1; then
-  need_node=1
-else
-  major="$(node -v | sed 's/^v//; s/\..*//')"
-  if [ "${major:-0}" -lt 18 ]; then need_node=1; fi
-fi
-if [ "$need_node" = "1" ]; then
-  echo "Menginstal Node.js 20 dari repo apt resmi NodeSource (bukan pipe ke bash)..."
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-  NODE_MAJOR=20
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
-  apt-get update -y
-  apt-get install -y nodejs
-fi
-echo "Node: $(node -v)"
-npm install -g pm2
+# ---------- 2. Node.js >= 18 + PM2 ----------
+# Dibungkus fungsi karena dipanggil dua kali: sekali di sini (install biasa)
+# dan sekali lagi di akhir siapkan_install_total (install total menghapus
+# Node/PM2 lewat hapus_stack_darren, jadi harus dipasang lagi sebelum
+# node --check dan langkah 8 yang memakai npm/pm2).
+pasang_node_pm2() {
+  local need_node=0
+  local major=""
+  if ! command -v node >/dev/null 2>&1; then
+    need_node=1
+  else
+    major="$(node -v | sed 's/^v//; s/\..*//')"
+    if [ "${major:-0}" -lt 18 ]; then need_node=1; fi
+  fi
+  if [ "$need_node" = "1" ]; then
+    echo "Menginstal Node.js 20 dari repo apt resmi NodeSource (bukan pipe ke bash)..."
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    NODE_MAJOR=20
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
+    apt-get update -y
+    apt-get install -y nodejs
+  fi
+  echo "Node: $(node -v)"
+  npm install -g pm2
+}
+pasang_node_pm2
 
 # ---------- 3. Ambil source ----------
 if [ -f "./v4-main/bot-js/app.js" ]; then

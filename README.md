@@ -54,7 +54,14 @@ service vpn-api dan xray, file aplikasi, menu utama termasuk
 permission (`cek-izin` + log + cache), dan source installer.
 Akun-akun ikut terhapus.
 
-Yang sengaja TIDAK dihapus: node, npm, dan pm2. Entri server di
+Yang JUGA dihapus sejak penguatan uninstall: node, npm, pm2
+(global + daemon + startup + ~/.pm2), dan vnstat. Restore total
+artinya kembalikan file backup + install ulang (Node/PM2/vnstat
+dipasang lagi dari nol oleh installer).
+
+Yang sengaja TIDAK dihapus: OS dasar, perkakas generik
+(curl, git, wget, unzip, python3, sqlite3, openssl), repo apt
+NodeSource, kunci/konfigurasi SSH, dan direktori backup. Entri server di
 daftar izin permission tetap ada di repo (tidak mengganggu); hapus
 barisnya dari `v4-main/Cdy/izin-servers.txt` bila server itu tidak
 dipakai lagi.
