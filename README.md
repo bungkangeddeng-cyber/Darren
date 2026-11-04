@@ -5,7 +5,7 @@ diperbaiki dari audit bug statis 2026-11-01. Lihat `BUGS-v4-main.md`
 untuk daftar bug asli, dan `v4-main/CHANGELOG-FIXED.md` untuk daftar
 perbaikan yang sudah diterapkan.
 
-Versi installer: `fix-total-20261104-01` — penanda yang bisa di-grep
+Versi installer: `fix-total-20261104-02` — penanda yang bisa di-grep
 di header `install.sh` (`DARREN_INSTALLER_VERSION`). Bila isi
 `install.sh` yang terunduh belum menyebut penanda itu, berarti cache
 GitHub belum segar — tunggu beberapa menit lalu unduh ulang.

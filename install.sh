@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261104-01
+# DARREN_INSTALLER_VERSION=fix-total-20261104-02
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
@@ -29,7 +29,7 @@ set -euo pipefail
 # script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # B15: penanda versi (grep DARREN_INSTALLER_VERSION).
-DARREN_INSTALLER_VERSION="fix-total-20261104-01"
+DARREN_INSTALLER_VERSION="fix-total-20261104-02"
 # B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
 # rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
 # ubah konstanta ini + README, lalu uji live ulang.
@@ -612,8 +612,16 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
     XRAY_OK=0
     if [ -n "$XRAY_ZIP" ] && curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/${XRAY_ZIP}"; then
       if curl -fsSL --retry 3 -o xray.zip.dgst "https://github.com/XTLS/Xray-core/releases/download/${tag}/${XRAY_ZIP}.dgst" 2>/dev/null; then
-        DGST="$(grep -i 'SHA256' xray.zip.dgst 2>/dev/null | grep -oE '[0-9a-fA-F]{64}' | head -1)"
-        ACTUAL="$(sha256sum xray.zip 2>/dev/null | awk '{print $1}')"
+        # Format .dgst Xray yang sebenarnya memakai label 'SHA2-256=',
+        # bukan 'SHA256' — grep lama tidak pernah cocok, dan dengan
+        # pipefail kegagalan grep itu memicu trap ERR (installer mati
+        # diam-diam). '|| true' membuat parse yang gagal mengalir ke
+        # jalur ERROR eksplisit di bawah, bukan ke trap.
+        DGST="$(grep -i 'SHA2-256' xray.zip.dgst 2>/dev/null | grep -oE '[0-9a-fA-F]{64}' | head -1 || true)"
+        if [ -z "$DGST" ]; then
+          DGST="$(grep -i 'SHA256' xray.zip.dgst 2>/dev/null | grep -oE '[0-9a-fA-F]{64}' | head -1 || true)"
+        fi
+        ACTUAL="$(sha256sum xray.zip 2>/dev/null | awk '{print $1}' || true)"
         if [ -n "$DGST" ] && [ -n "$ACTUAL" ]; then
           if [ "$DGST" = "$ACTUAL" ]; then
             XRAY_OK=1
