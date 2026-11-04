@@ -5,9 +5,9 @@
 // dibaca dari env H2H_API_KEY di server saat deploy.
 // JANGAN pernah menulis nilai kunci di file ini / di repo.
 // Pola dipakai: poller 30 detik (deposit) / 60 detik (sewa).
-// Webhook H2H (payment.success/expired) TIDAK dipakai di fase ini:
-// bot ini tidak punya HTTP listener; receiver adalah pekerjaan
-// deploy (URL publik + nginx), bukan kode saja.
+// Webhook H2H: receiver loopback 8899 + nginx :81; pendaftaran lewat H2H
+// publik (registerWebhook) memakai kunci + secret config — mandiri,
+// tanpa panel dan tanpa Muse (untuk skrip sewa).
 // ============================================================
 const axios = require('axios');
 const QRCode = require('qrcode');
@@ -144,4 +144,42 @@ async function getQrisStatus(qrisId) {
   return { ok: true, status: status || 'unknown', paidAmount: pickAmount(p) };
 }
 
-module.exports = { createQris, getQrisStatus, isPaidStatus, isExpiredStatus };
+
+// Daftar webhook akun ini (GET, tanpa nilai kunci/secret di output).
+async function listWebhooks() {
+  const { baseUrl, apiKey } = creds();
+  if (!apiKey) throw new Error('Kunci gateway belum dikonfigurasi.');
+  const res = await axios.get(`${baseUrl}/gopay/webhooks`, {
+    headers: { 'x-api-key': apiKey }, timeout: 15000,
+  });
+  const arr = (res.data && res.data.data) || [];
+  return Array.isArray(arr) ? arr : [];
+}
+
+// Daftarkan webhook deposit bot ini ke gateway (idempotent: bila URL sudah
+// terdaftar, tidak membuat duplikat). Secret = secret webhook config bot;
+// gateway memvalidasi lewat ping bertanda tangan (wajib 2xx).
+async function registerWebhook(url) {
+  const { baseUrl, apiKey } = creds();
+  const secret = config.webhook?.secret || '';
+  if (!apiKey) throw new Error('Kunci gateway belum dikonfigurasi.');
+  if (!secret) throw new Error('Secret webhook belum dikonfigurasi.');
+  const list = await listWebhooks().catch(() => []);
+  if (list.some((w) => w.url === url)) return { already: true };
+  let res;
+  try {
+    res = await axios.post(`${baseUrl}/gopay/webhooks`, {
+      url, events: ['payment.success', 'payment.expired'], secret,
+    }, {
+      headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' }, timeout: 20000,
+    });
+  } catch (e) {
+    const st = e?.response?.status || null;
+    const msg = (e?.response?.data && e.response.data.message) || e.message || '';
+    throw new Error(`HTTP ${st || ''} ${msg}`.trim());
+  }
+  if (!res.data || res.data.success === false) throw new Error('Gateway menolak pendaftaran.');
+  return { already: false };
+}
+
+module.exports = { createQris, getQrisStatus, isPaidStatus, isExpiredStatus, listWebhooks, registerWebhook };

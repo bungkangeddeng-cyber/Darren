@@ -2476,6 +2476,7 @@ const apiMenuKb = () => ({ inline_keyboard: [
   [sBtn('🔑 Input Kunci Gateway', 'adm_api_H2H_API_KEY', 'primary'), sBtn('🤫 Input Secret Webhook', 'adm_api_WEBHOOK_SECRET', 'primary')],
   [sBtn('👤 Input User Digiflazz', 'adm_api_DIGIFLAZZ_USERNAME', 'primary'), sBtn('🔑 Input Kunci Digiflazz', 'adm_api_DIGIFLAZZ_API_KEY', 'primary')],
   [sBtn('🔗 URL Webhook', 'adm_api_url', 'primary'), sBtn('🔄 Terapkan &amp; Restart Bot', 'adm_api_apply', 'success')],
+  [sBtn('📡 Daftarkan Webhook', 'adm_api_register', 'success')],
   [sBtn('🔙 Kembali', 'adm_back', 'danger')],
 ] });
 bot.action('adm_api', async (ctx) => {
@@ -2513,6 +2514,30 @@ bot.action('adm_api_apply', async (ctx) => {
   sessions.delete(ctx.chat.id);
   await ctx.reply('🔄 <b>Menerapkan &amp; me-restart bot...</b> Tunggu beberapa detik, lalu cek panel admin lagi.', { parse_mode: 'HTML' });
   setTimeout(() => { try { require('child_process').exec('pm2 restart ripzz-bot-js'); } catch (_) {} }, 800);
+});
+bot.action('adm_api_register', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  sessions.delete(ctx.chat.id);
+  const url = apiSettings.webhookUrl();
+  const st = apiSettings.getStatus();
+  const keySt = st.find((f) => f.key === 'H2H_API_KEY');
+  const secSt = st.find((f) => f.key === 'WEBHOOK_SECRET');
+  if (!url) return ctx.reply('❌ Domain VPN belum diset. Input Domain VPN dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  if (!keySt || !keySt.filled) return ctx.reply('❌ Kunci gateway belum diisi. Input Kunci Gateway dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  if (!secSt || !secSt.filled) return ctx.reply('❌ Secret webhook belum diisi. Input Secret Webhook dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  try {
+    const r = await h2h.registerWebhook(url);
+    if (r.already) return ctx.reply(`✅ Webhook sudah terdaftar di gateway:\n<code>${esc(url)}</code>\n\n<i>Panel /webhook menampilkan webhook ini juga.</i>`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+    return ctx.reply(`✅ Webhook terdaftar di gateway:\n<code>${esc(url)}</code>\nEvent: payment.success, payment.expired\n\n<i>Deposit berikutnya masuk instan lewat webhook ini. Panel /webhook menampilkan webhook ini juga.</i>`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  } catch (e) {
+    const m = e?.message || 'unknown';
+    let hint = '';
+    if (m.includes('401')) hint = '\n\n<i>401 = secret belum diterapkan atau tidak cocok — tekan Terapkan &amp; Restart dulu, lalu coba lagi.</i>';
+    else if (m.includes('409')) hint = '\n\n<i>409 = sudah 10 webhook, hapus salah satu dulu.</i>';
+    else if (m.includes('503')) hint = '\n\n<i>503 = layanan akun gateway tidak jalan.</i>';
+    return ctx.reply(`❌ Gagal mendaftar: ${esc(m)}${hint}`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  }
 });
 bot.action('adm_back', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
