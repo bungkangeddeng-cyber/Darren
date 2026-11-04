@@ -49,6 +49,14 @@ const bot = new Telegraf(config.botToken);
 const BOT_START_TIME = Date.now(); // untuk hitung uptime di /start
 const sessions = new Map(); // chatId -> { step, data }
 const lastMenus = new Map();
+// Persistensi menu terakhir (tahan restart): userId -> messageId.
+const LAST_MENUS_FILE = path.join(__dirname, 'data', 'last-menus.json');
+function saveLastMenus() {
+  try { fs.writeFileSync(LAST_MENUS_FILE, JSON.stringify([...lastMenus])); } catch (_) {}
+}
+try {
+  for (const [k, v] of JSON.parse(fs.readFileSync(LAST_MENUS_FILE, 'utf8'))) lastMenus.set(Number(k), v);
+} catch (_) {}
 // Helper aman untuk answerCbQuery (thrown sync oleh Telegraf bila bukan callback_query)
 const safeCb = async (ctx) => {
   try { await ctx.answerCbQuery(); } catch (e) { /* ignore */ }
@@ -64,7 +72,7 @@ const sBtn = (text, data, style) => {
 const ASSETS_DIR = path.join(__dirname, 'assets');
 
 // ---------- Helper: kirim menu bergambar (ala BotVPN2) ----------
-async function sendMenuPhoto(ctx, imageFile, caption, keyboard) {
+async function sendMenuPhotoInner(ctx, imageFile, caption, keyboard) {
   const userId = ctx.from?.id;
   const chatId = ctx.chat?.id;
   const imgPath = path.join(ASSETS_DIR, imageFile);
@@ -75,6 +83,7 @@ async function sendMenuPhoto(ctx, imageFile, caption, keyboard) {
     try { await ctx.telegram.deleteMessage(chatId, lastMenus.get(userId)); } catch (e) {}
     lastMenus.delete(userId);
   }
+  saveLastMenus();
 
   // jika dari callback query, hapus pesan callback dulu
   if (ctx.updateType === 'callback_query' && ctx.callbackQuery?.message?.message_id) {
@@ -96,7 +105,20 @@ async function sendMenuPhoto(ctx, imageFile, caption, keyboard) {
     sent = await ctx.reply(caption, { parse_mode: 'HTML', reply_markup: replyMarkup });
   }
   if (userId && sent?.message_id) lastMenus.set(userId, sent.message_id);
+  saveLastMenus();
   return sent;
+}
+
+const menuLocks = new Map();
+// Serialisasi per user: tap ganda tidak bisa membuat dua menu sekaligus.
+async function sendMenuPhoto(...args) {
+  const ctx = args[0];
+  const userId = ctx.from?.id;
+  if (!userId) return sendMenuPhotoInner(...args);
+  const prev = menuLocks.get(userId) || Promise.resolve();
+  const cur = prev.then(() => sendMenuPhotoInner(...args));
+  menuLocks.set(userId, cur.catch(() => {}));
+  return cur;
 }
 
 // ---------- Helper ----------
@@ -572,6 +594,7 @@ bot.on('text', async (ctx) => {
     const field = sess.data?.field;
     const value = ctx.message.text.trim();
     sessions.delete(chatId);
+    if (sess?.data?.menuMsgId) { try { await ctx.telegram.deleteMessage(chatId, sess.data.menuMsgId); } catch (_) {} }
     const f = apiSettings.FIELDS.find((x) => x.key === field);
     if (!f) return ctx.reply('❌ Field tidak dikenal.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
     if (!value) return ctx.reply('❌ Nilai tidak boleh kosong.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
@@ -2446,7 +2469,11 @@ const liveServerKb = () => ({ inline_keyboard: [[sBtn('🔄 Refresh', 'adm_lives
 bot.action('adm_liveserver', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
-  await ctx.reply(await liveServerText(), { parse_mode: 'HTML', reply_markup: liveServerKb() });
+  try { await ctx.editMessageText(await liveServerText(), { parse_mode: 'HTML', reply_markup: liveServerKb() }); }
+  catch (_) {
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, ctx.callbackQuery?.message?.message_id); } catch (_) {}
+    await ctx.reply(await liveServerText(), { parse_mode: 'HTML', reply_markup: liveServerKb() });
+  }
 });
 bot.action('adm_liveserver_refresh', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
@@ -2480,19 +2507,26 @@ const apiMenuKb = () => ({ inline_keyboard: [
   [sBtn('👁️ Tampilkan Secret 10 Detik', 'adm_api_showsecret', 'warning')],
   [sBtn('🔙 Kembali', 'adm_back', 'danger')],
 ] });
+async function replyApiMenu(ctx, text) {
+  try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+  catch (_) {
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, ctx.callbackQuery?.message?.message_id); } catch (_) {}
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  }
+}
+
 bot.action('adm_api', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
   sessions.delete(ctx.chat.id);
-  try { await ctx.editMessageText(apiMenuText(), { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
-  catch (_) { await ctx.reply(apiMenuText(), { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+  await replyApiMenu(ctx, apiMenuText());
 });
 bot.action(/^adm_api_(VPN_DOMAIN|H2H_BASE_URL|H2H_API_KEY|WEBHOOK_SECRET|DIGIFLAZZ_USERNAME|DIGIFLAZZ_API_KEY)$/, async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
   const field = ctx.match[1];
   const label = (apiSettings.FIELDS.find((f) => f.key === field) || {}).label || field;
-  sessions.set(ctx.chat.id, { step: 'adm_api_input', data: { field } });
+  sessions.set(ctx.chat.id, { step: 'adm_api_input', data: { field, menuMsgId: ctx.callbackQuery?.message?.message_id } });
   await ctx.reply(`✏️ <b>Input ${esc(label)}</b>\n\nKetik nilainya sekarang (satu baris, tanpa spasi). Ketik <code>batal</code> untuk membatalkan.\n<i>Untuk kunci/secret: setelah terkirim, hapus pesan itu dari chat.</i>`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[sBtn('🔙 Kembali', 'adm_api', 'danger')]] } });
 });
 bot.action('adm_api_url', async (ctx) => {
@@ -2506,8 +2540,7 @@ bot.action('adm_api_url', async (ctx) => {
   const text = url
     ? `🔗 <b>URL WEBHOOK DEPOSIT</b>\n\n<code>${esc(url)}</code>\n\nEvents: <code>payment.success</code>, <code>payment.expired</code>\nSecret webhook: ${sec && sec.filled ? '✅ terisi' : '❌ kosong — input dulu'}\nKunci gateway: ${h2h && h2h.filled ? '✅ terisi' : '❌ kosong'}\n\n<i>Daftarkan URL ini di gateway (panel /webhook) dengan secret yang sama seperti di bot. Pendaftaran otomatis dari bot belum tersedia karena admin API gateway hanya loopback di Biznet.</i>`
     : '❌ <b>Domain VPN belum diset.</b> Input Domain VPN dulu, lalu buka lagi URL Webhook.';
-  try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
-  catch (_) { await ctx.reply(text, { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+  await replyApiMenu(ctx, text);
 });
 bot.action('adm_api_apply', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
@@ -2524,21 +2557,21 @@ bot.action('adm_api_register', async (ctx) => {
   const st = apiSettings.getStatus();
   const keySt = st.find((f) => f.key === 'H2H_API_KEY');
   const secSt = st.find((f) => f.key === 'WEBHOOK_SECRET');
-  if (!url) return ctx.reply('❌ Domain VPN belum diset. Input Domain VPN dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
-  if (!keySt || !keySt.filled) return ctx.reply('❌ Kunci gateway belum diisi. Input Kunci Gateway dulu, lalu Terapkan &amp; Restart.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  if (!url) return replyApiMenu(ctx, '❌ Domain VPN belum diset. Input Domain VPN dulu, lalu Terapkan &amp; Restart.');
+  if (!keySt || !keySt.filled) return replyApiMenu(ctx, '❌ Kunci gateway belum diisi. Input Kunci Gateway dulu, lalu Terapkan &amp; Restart.');
   const runningSecret = config.webhook?.secret || '';
-  if ((!secSt || !secSt.filled) && !runningSecret) return ctx.reply('❌ Secret webhook belum diisi. Restart bot sekali (secret dibuat otomatis), lalu coba lagi.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  if ((!secSt || !secSt.filled) && !runningSecret) return replyApiMenu(ctx, '❌ Secret webhook belum diisi. Restart bot sekali (secret dibuat otomatis), lalu coba lagi.');
   try {
     const r = await h2h.registerWebhook(url);
-    if (r.already) return ctx.reply(`✅ Webhook sudah terdaftar di gateway:\n<code>${esc(url)}</code>\n\n<i>Panel /webhook menampilkan webhook ini juga.</i>`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
-    return ctx.reply(`✅ Webhook terdaftar di gateway:\n<code>${esc(url)}</code>\nEvent: payment.success, payment.expired\n\n<i>Deposit berikutnya masuk instan lewat webhook ini. Panel /webhook menampilkan webhook ini juga.</i>`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+    if (r.already) return replyApiMenu(ctx, `✅ Webhook sudah terdaftar di gateway:\n<code>${esc(url)}</code>\n\n<i>Panel /webhook menampilkan webhook ini juga.</i>`);
+    return replyApiMenu(ctx, `✅ Webhook terdaftar di gateway:\n<code>${esc(url)}</code>\nEvent: payment.success, payment.expired\n\n<i>Deposit berikutnya masuk instan lewat webhook ini. Panel /webhook menampilkan webhook ini juga.</i>`);
   } catch (e) {
     const m = e?.message || 'unknown';
     let hint = '';
     if (m.includes('401')) hint = '\n\n<i>401 = secret belum diterapkan atau tidak cocok — tekan Terapkan &amp; Restart dulu, lalu coba lagi.</i>';
     else if (m.includes('409')) hint = '\n\n<i>409 = sudah 10 webhook, hapus salah satu dulu.</i>';
     else if (m.includes('503')) hint = '\n\n<i>503 = layanan akun gateway tidak jalan.</i>';
-    return ctx.reply(`❌ Gagal mendaftar: ${esc(m)}${hint}`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+    return replyApiMenu(ctx, `❌ Gagal mendaftar: ${esc(m)}${hint}`);
   }
 });
 bot.action('adm_api_showsecret', async (ctx) => {
@@ -2563,6 +2596,7 @@ bot.action('adm_back', async (ctx) => {
       parse_mode: 'HTML', reply_markup: adminPanel().reply_markup,
     });
   } catch (e) {
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, ctx.callbackQuery?.message?.message_id); } catch (_) {}
     await ctx.reply(await adminPanelText(), { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup });
   }
 });
