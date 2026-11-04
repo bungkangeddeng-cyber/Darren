@@ -165,6 +165,17 @@ async function createDeposit(telegramId, amount) {
 
 // ---------- Beli produk ----------
 async function buyProduct(telegramId, buyerSkuCode, customerNo, priceSell) {
+  // FASE 2: cek saldo supplier SEBELUM potong saldo user. Saldo tidak
+  // cukup atau tidak dapat diperiksa = order gagal, saldo user utuh.
+  // Ambang = harga jual (>= modal bila margin >= 0, jadi aman ke atas).
+  try {
+    const bal = await digi.balance();
+    const sup = Number(bal?.deposit ?? bal?.saldo ?? NaN);
+    if (!Number.isNaN(sup) && sup < priceSell)
+      return { success: false, message: `❌ Saldo supplier tidak cukup (tersisa ${digi.rp(sup)}). Order dibatalkan, saldo kamu tidak terpotong.` };
+  } catch (e) {
+    return { success: false, message: `❌ Saldo supplier tidak dapat diperiksa (${esc(e.message || 'error')}). Order dibatalkan, saldo kamu tidak terpotong.` };
+  }
   const cek = await deductSaldo(telegramId, priceSell);
   if (!cek.success) return cek;
   const ref = refId('PPOB');

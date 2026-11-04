@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """VPN API for v4 bot-js (localhost only, port 5890).
 Endpoints (GET, BotVPN2-style): /createshh /createvmess /createvless
-/createtrojan /createss /renew /delete /createzivpn /health
+/createtrojan /createss /renew /delete /createzivpn /countaccounts /health
 Returns JSON {"status":"success"} or {"status":"error","message":...}.
 Xray changes use the same marker-insertion pattern as the menu scripts
 (#vmess, #vmessgrpc, #vless, #trojanws, #ssws) and are validated with
@@ -318,7 +318,7 @@ def create_xray_proto(kind, q):
         if not pw or "\n" in pw or "\r" in pw:
             return err("password tidak valid")
         def fn():
-            return insert_xray("#ssws", f"#!! {user} {expd}", '},{"password": "%s","method": "aes-128-gcm","email": "%s"' % (pw, user))
+            return insert_xray("#ssws", f"#!! {user} {expd}", '},{"password": "%s","method": "aes-256-gcm","email": "%s"' % (pw, user))
         res = change_xray(fn)
         if res.get("status") == "success":
             os.makedirs(data_path("shadowsocks"), exist_ok=True)
@@ -468,6 +468,59 @@ def delete(q):
     if res.get("status") == "success":
         return err("klien Xray masih ada sesudah hapus")
     return res
+
+def count_accounts():
+    # FASE 2: hitung akun dari config yang dilayani server ini (cerminan
+    # logika countAccounts bot-js, dipindah ke sisi server agar benar di
+    # multi-server). File hilang/rusak = 0 untuk protokol itu, bukan error.
+    counts = {"ssh": 0, "vmess": 0, "vless": 0, "trojan": 0, "shadowsocks": 0, "total": 0}
+    try:
+        sysusers = set()
+        with open("/etc/passwd") as f:
+            for line in f:
+                p = line.split(":")
+                if len(p) >= 3 and p[0] != "nobody":
+                    try:
+                        uid = int(p[2])
+                    except ValueError:
+                        continue
+                    if uid >= 1000:
+                        sysusers.add(p[0])
+    except OSError:
+        sysusers = set()
+    try:
+        names = set()
+        with open("/etc/ssh/.ssh.db") as f:
+            for raw in f:
+                t = raw.strip()
+                if t.startswith("###") or t.startswith("#ssh#"):
+                    parts = t.split()
+                    if len(parts) >= 2 and parts[1] in sysusers:
+                        names.add(parts[1])
+        counts["ssh"] = len(names)
+    except OSError:
+        pass
+    try:
+        with open(CFG) as f:
+            lines = f.readlines()
+        clean = "\n".join(l for l in lines if not l.strip().startswith("#"))
+        parsed = json.loads(clean)
+        sets = {"vmess": set(), "vless": set(), "trojan": set(), "shadowsocks": set()}
+        for ib in parsed.get("inbounds", []):
+            if ib.get("protocol") in sets:
+                for cl in (ib.get("settings") or {}).get("clients", []):
+                    if cl.get("email"):
+                        sets[ib["protocol"]].add(cl["email"])
+        for k, s in sets.items():
+            counts[k] = len(s)
+    except Exception:
+        pass
+    counts["total"] = sum(counts[k] for k in ("ssh", "vmess", "vless", "trojan", "shadowsocks"))
+    body = ok()
+    body["counts"] = counts
+    return body
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -494,6 +547,8 @@ class H(BaseHTTPRequestHandler):
             body = renew(qs)
         elif p.path == "/delete":
             body = delete(qs)
+        elif p.path == "/countaccounts":
+            body = count_accounts()
         elif p.path == "/createzivpn":
             body = err("zivpn memakai API terpisah di port 5888, bukan API ini")
         else:

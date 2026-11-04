@@ -32,15 +32,12 @@
 
 ## Installation
 
-### Costum Os UBUNTU 20.04
-```bash
-apt update -y && wget https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh -O reinstall && chmod +x reinstall && bash reinstall ubuntu 20.04 && reboot
-```
-
-### Install Script
-```bash
-apt update -y && apt install screen curl wget python3-pip -y && wget -q https://raw.githubusercontent.com/ajijainalganteng-wq/v4/main/Vpn/xray.zip -O /tmp/install && chmod +x /tmp/install && screen -S ari /tmp/install
-```
+### Install Script (saat ini)
+Pakai installer repo ini (lihat README root): unduh `install.sh` dari
+main lalu jalankan sebagai root di VPS Ubuntu 24.04. Installer memasang
+bot-js + VPN API (port 5890) + menu SSH, Xray (praktis wajib), dan
+mendukung multi-server + gateway H2H. Instruksi Ubuntu 20.04 / zip lama
+sebelumnya sudah kedaluwarsa dan dihapus.
 
 ### Update Script
 ```bash

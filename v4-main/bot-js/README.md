@@ -1,7 +1,7 @@
 # 🤖 RIPZZ VPN Bot (@Notif2Ajibot)
 
 Bot Telegram VPN + PPOB berbasis Node.js + Telegraf.
-Arsitektur terinspirasi BotVPN2, disesuaikan untuk Aji (RIPZZ STORE).
+Arsitektur bot sendiri (VPN API port 5890 + gateway H2H + multi-server), disesuaikan untuk Aji (RIPZZ STORE).
 
 ## Fitur
 
@@ -67,7 +67,7 @@ pm2 startup
 2. **ADMIN_ID** — isi dengan ID Telegram kamu sendiri (tidak ada default)
 3. **VPN_API_BASE** — base URL API server VPN (format endpoint mengikuti pola
    `/createshh`, `/createvmess`, `/createvless`, `/createtrojan`, `/renew`, `/delete`
-   seperti yang dipakai BotVPN2 di port 5888). Sesuaikan bila API di server beda.
+   seperti yang dipakai API repo ini di port 5890). Sesuaikan bila API di server beda.
 4. **CloudFront** — `CF_DOMAIN`, `CF_VMESS_UUID`, `CF_VLESS_UUID`, `CF_TROJAN_PASSWORD`
    (kredensial yang sudah dibuat saat setup VPS Aji; untuk server lain isi sesuai
    kredensial CF di server masing-masing)

@@ -310,19 +310,6 @@ function basePrice(product, type) {
 // HARGA JUAL
 // ============================================================
 
-function sellPrice(product, role, type = 'prepaid') {
-  const margin = Number(
-    config.roles?.margin?.[role] ??
-    config.roles?.margin?.bronze ??
-    0
-  );
-
-  return Math.ceil(
-    basePrice(product, type) *
-    (1 + margin / 100)
-  );
-}
-
 
 // ============================================================
 // STATUS PRODUK
@@ -542,7 +529,6 @@ module.exports = {
   checkTransaction,
   find,
   basePrice,
-  sellPrice,
   cats,
   brands,
   list,

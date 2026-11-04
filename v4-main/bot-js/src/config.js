@@ -15,7 +15,7 @@ module.exports = {
   adminId: num(process.env.ADMIN_ID, 0), // FIXED: no hardcoded admin; 0 = no admin until configured
 
   vpn: {
-    apiBase: (process.env.VPN_API_BASE || 'http://127.0.0.1:5888').replace(/\/$/, ''),
+    apiBase: (process.env.VPN_API_BASE || 'http://127.0.0.1:5890').replace(/\/$/, ''),
     apiAuth: process.env.VPN_API_AUTH || '',
     domain: process.env.VPN_DOMAIN || '', // FIXED: must be set in .env
   },

@@ -7,12 +7,12 @@ perbaikan yang sudah diterapkan.
 
 ## Instalasi di VPS baru (sebagai root)
 
-Repo ini PRIVATE. Tanpa izin owner, orang lain tidak bisa mengunduh
-atau memakai script ini. Setiap install butuh token baca dari HP
-owner: GitHub -> token read-only khusus repo Darren, masa berlaku
-pendek (buat token baru per install). Token yang sama dipakai di
-perintah unduh dan saat installer meminta (atau lewat env
-`GH_TOKEN`).
+Repo ini saat ini PUBLIK; migrasi ke private + token masih rencana,
+bukan fakta. Setelah repo di-private-kan oleh owner (rencana),
+setiap install butuh token baca dari HP owner: GitHub -> token
+read-only khusus repo Darren, masa berlaku pendek (buat token baru
+per install). Token yang sama dipakai di perintah unduh dan saat
+installer meminta (atau lewat env `GH_TOKEN`).
 
 ```bash
 curl -fsSL -H "Authorization: Bearer ISI_TOKEN_DARI_HP" https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/install.sh -o install.sh
@@ -23,7 +23,8 @@ chmod +x install.sh
 Installer akan meminta token GitHub baca repo, BOT_TOKEN, ADMIN_ID,
 dan konfigurasi opsional lewat prompt (tidak di-echo, tidak
 disimpan di dalam script), membuat auth API acak, menginstal
-bot-js + VPN API, dan menawarkan instalasi Xray secara opsional.
+bot-js + VPN API, dan instalasi Xray (praktis wajib: menjawab N
+membuat verifikasi akhir gagal, jadi install dinyatakan gagal).
 Di akhir installer juga meminta token baca izin menu (disimpan
 terkunci di `/etc/xray/izin-token`, mode 600) — wajib setelah repo
 private, supaya menu tetap bisa membaca daftar izin. BotVPN2 lama
@@ -103,8 +104,9 @@ menu server itu berhenti setelah cache habis).
 
 ## Keamanan — baca dulu
 
-- Repo ini PRIVATE. Tanpa token baca dari owner, tidak ada yang
-  bisa mengunduh atau memakai script ini. Jangan pernah menaruh
+- Repo ini saat ini PUBLIK; private + token adalah rencana migrasi,
+  bukan fakta saat ini. Setelah repo di-private-kan, tanpa token baca
+  dari owner tidak ada yang bisa mengunduh atau memakai script ini. Jangan pernah menaruh
   token, password, atau kunci privat di dalam repo, chat, atau log.
 - Token bersifat revocable: token install pakai masa berlaku
   pendek (buat baru per install); token baca izin dicabut per

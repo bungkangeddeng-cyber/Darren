@@ -133,6 +133,20 @@ siapkan_install_total() {
   # FASE 1: drop-in Xray ikut dibackup supaya penghapusannya di
   # hapus_stack_darren tidak menghilangkan jejak unit efektif lama.
   [ -d /etc/systemd/system/xray.service.d ] && cp -a /etc/systemd/system/xray.service.d "$backup/" 2>/dev/null || true
+  # FASE 2: backup lebih lengkap — API, unit systemd, entry point menu.
+  [ -f /root/vpn-api.py ] && cp -a /root/vpn-api.py "$backup/" 2>/dev/null || true
+  for _unit in vpn-api.service xray.service limitvmess.service limitvless.service limittrojan.service limitshadowsocks.service; do
+    [ -f "/etc/systemd/system/$_unit" ] && cp -a "/etc/systemd/system/$_unit" "$backup/" 2>/dev/null || true
+  done
+  for _menu in menu cek-izin xray-restart; do
+    [ -f "/usr/bin/$_menu" ] && cp -a "/usr/bin/$_menu" "$backup/" 2>/dev/null || true
+  done
+  # FASE 2: retensi — simpan 5 backup terbaru, hapus yang lebih lama.
+  # Hanya direktori darren-*-backup-* di /root; tidak pernah yang lain.
+  for _old in $(ls -dt /root/darren-*-backup-*/ 2>/dev/null | tail -n +6); do
+    rm -rf "$_old"
+  done
+
   echo "Mengambil source baru ..."
   tmp_src="/tmp/darren-fresh-$$"
   rm -rf "$tmp_src"
@@ -294,20 +308,37 @@ fi
 # VPN_API_BASE) sudah terisi di sana dan dipakai langkah 6-9 di bawah.
 
 # ---------- 6. Salin bot + API ----------
+# FASE 2: cadangkan .env lama SEBELUM rm -rf (salinan baru dari repo
+# tidak berisi .env, jadi pemeriksaan .env sesudah rm selalu gagal dan
+# cabang "jangan timpa" lama praktis mati).
+OLD_ENV_TMP=""
+if [ -f "$BOT_DIR/.env" ]; then
+  OLD_ENV_TMP="$(mktemp)"
+  cp -a "$BOT_DIR/.env" "$OLD_ENV_TMP" 2>/dev/null || OLD_ENV_TMP=""
+fi
 rm -rf "$BOT_DIR"
 cp -a "$SRC_DIR/v4-main/bot-js" "$BOT_DIR"
 cp "$SRC_DIR/v4-main/Api/vpn-api.py" "$API_FILE"
 
-# .env: jangan timpa .env lama tanpa konfirmasi
-if [ -f "$BOT_DIR/.env" ]; then
-  read -r -p ".env sudah ada. Timpa dengan konfigurasi baru? [y/N] " overwrite || true
+# .env: jangan timpa .env lama tanpa konfirmasi. Cadangan dibuat SEBELUM
+# rm -rf di atas. Bila dipertahankan, auth API disamakan dengan .env lama
+# supaya bot dan API tidak mismatch (peringatan teks saja tidak cukup).
+if [ -n "$OLD_ENV_TMP" ]; then
+  read -r -p ".env lama ditemukan. Timpa dengan konfigurasi baru? [y/N] " overwrite || true
   if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-    echo "Memakai .env lama. Pastikan VPN_API_AUTH di .env sama dengan auth API di bawah."
-    grep -q 'H2H_API_KEY=gk_' "$BOT_DIR/.env" 2>/dev/null || echo "PERHATIAN: .env lama tidak berisi H2H_API_KEY — deposit H2H nonaktif sampai kunci gk_ operator ditambahkan."
-  else
-    rm -f "$BOT_DIR/.env"
+    cp -a "$OLD_ENV_TMP" "$BOT_DIR/.env"
+    chmod 600 "$BOT_DIR/.env"
+    echo "Memakai .env lama (dipulihkan dari cadangan sebelum hapus)."
+    OLD_AUTH="$(grep '^VPN_API_AUTH=' "$BOT_DIR/.env" | head -1 | cut -d= -f2-)"
+    if [ -n "$OLD_AUTH" ]; then
+      VPN_API_AUTH="$OLD_AUTH"
+    else
+      echo "VPN_API_AUTH=$VPN_API_AUTH" >> "$BOT_DIR/.env"
+    fi
   fi
+  rm -f "$OLD_ENV_TMP"
 fi
+
 if [ ! -f "$BOT_DIR/.env" ]; then
   cat > "$BOT_DIR/.env" <<EOF
 BOT_TOKEN=$BOT_TOKEN
@@ -368,12 +399,42 @@ pm2 startup systemd -u root --hp /root 2>/dev/null || echo "pm2 startup perlu di
 # hanya dipakai, tidak ditanya lagi.
 if [[ ! "$install_xray" =~ ^[Nn] ]]; then
   echo "Menginstal Xray dari release resmi XTLS..."
-  tag="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)" || tag=""
+  tag="$(curl -fsSL --retry 3 https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)" || tag=""
   if [ -z "$tag" ]; then
     echo "Gagal mendapatkan versi Xray terbaru. Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
   else
     cd /tmp
-    if curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/Xray-linux-64.zip"; then
+    # FASE 2: petakan arsitektur ke aset rilis Xray (selain itu gagal eksplisit).
+    case "$(uname -m)" in
+      x86_64) XRAY_ZIP="Xray-linux-64.zip" ;;
+      aarch64|arm64) XRAY_ZIP="Xray-linux-arm64-v8a.zip" ;;
+      *) echo "Arsitektur $(uname -m) tidak didukung untuk unduhan Xray; instalasi Xray dilewati." >&2; XRAY_ZIP="" ;;
+    esac
+    # FASE 2: unduh + verifikasi digest SHA256 dari rilis bila tersedia.
+    # Digest tidak tersedia / tak terparse = lanjut dengan peringatan
+    # tercatat (bukan gagal); digest TIDAK COCOK = berkas dibuang, Xray batal.
+    XRAY_OK=0
+    if [ -n "$XRAY_ZIP" ] && curl -fsSL --retry 3 -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${tag}/${XRAY_ZIP}"; then
+      if curl -fsSL --retry 3 -o xray.zip.dgst "https://github.com/XTLS/Xray-core/releases/download/${tag}/${XRAY_ZIP}.dgst" 2>/dev/null; then
+        DGST="$(grep -i 'SHA256' xray.zip.dgst 2>/dev/null | grep -oE '[0-9a-fA-F]{64}' | head -1)"
+        ACTUAL="$(sha256sum xray.zip 2>/dev/null | awk '{print $1}')"
+        if [ -n "$DGST" ] && [ -n "$ACTUAL" ]; then
+          if [ "$DGST" = "$ACTUAL" ]; then
+            XRAY_OK=1
+          else
+            echo "Digest SHA256 xray.zip TIDAK COCOK dengan rilis; berkas dibuang, instalasi Xray dibatalkan." >&2
+            rm -f xray.zip
+          fi
+        else
+          echo "PERINGATAN: digest rilis tidak dapat diparse; lanjut tanpa verifikasi SHA256."
+          XRAY_OK=1
+        fi
+      else
+        echo "PERINGATAN: file digest rilis tidak tersedia; lanjut tanpa verifikasi SHA256."
+        XRAY_OK=1
+      fi
+    fi
+    if [ "$XRAY_OK" = 1 ]; then
       unzip -o xray.zip -d /tmp/xray-bin
       install -m 755 /tmp/xray-bin/xray /usr/local/bin/xray
       # FASE 1: template config memakai aturan geoip/geosite — dat file
@@ -448,7 +509,7 @@ EOF
         echo "Perbaiki jaringan lalu jalankan ulang installer." >&2
       fi
     else
-      echo "Gagal mengunduh Xray ${tag} (aset release bisa sedang ditarik/diperbarui atau jaringan sesaat). Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
+      echo "Xray tidak terunduh atau tidak lolos verifikasi digest (aset release bisa sedang ditarik/diperbarui, jaringan sesaat, atau digest tidak cocok). Instalasi Xray dilewati; verifikasi akhir akan menggagalkan install." >&2
     fi
   fi
 else
@@ -486,6 +547,29 @@ if [ -f "$MENU_ZIP" ]; then
 else
   echo "PERINGATAN: $MENU_ZIP tidak ditemukan, menu dilewati." >&2
 fi
+# FASE 2: pasang unit + script limit dari repo LOKAL (Fls) — tanpa unduh
+# eksternal. Pemetaan sesuai Fls/limit.sh bawaan repo (hanya pemetaan
+# berkasnya yang dipakai; logika unduh eksternal script itu TIDAK dipakai):
+# Fls/*.service -> /etc/systemd/system/, Fls/vmess|vless|trojan|shadowsocks
+# -> /etc/xray/limit.vmess|vless|trojan|shadowsocks. Unit TIDAK di-enable
+# di sini; limit-on-off yang mengaktifkan/menonaktifkan.
+if [ -d "$SRC_DIR/v4-main/Fls" ]; then
+  mkdir -p /etc/xray
+  for _svc in limitvmess limitvless limittrojan limitshadowsocks; do
+    if [ -f "$SRC_DIR/v4-main/Fls/$_svc.service" ]; then
+      cp -a "$SRC_DIR/v4-main/Fls/$_svc.service" /etc/systemd/system/ 2>/dev/null || echo "PERINGATAN: gagal memasang $_svc.service." >&2
+    fi
+  done
+  for _pair in "vmess:limit.vmess" "vless:limit.vless" "trojan:limit.trojan" "shadowsocks:limit.shadowsocks"; do
+    _src="${_pair%%:*}"; _dst="${_pair##*:}"
+    if [ -f "$SRC_DIR/v4-main/Fls/$_src" ]; then
+      cp -a "$SRC_DIR/v4-main/Fls/$_src" "/etc/xray/$_dst" 2>/dev/null && chmod +x "/etc/xray/$_dst" || echo "PERINGATAN: gagal memasang $_dst." >&2
+    fi
+  done
+  systemctl daemon-reload 2>/dev/null || true
+  echo "Unit + script limit terpasang dari repo lokal (belum di-enable; atur via limit-on-off)."
+fi
+
 
 # Token baca izin untuk menu (cek-izin): dipakai membaca allowlist dari repo
 # private. Disimpan terkunci (600) di /etc/xray/izin-token, hanya root yang baca.

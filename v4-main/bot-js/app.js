@@ -149,6 +149,7 @@ const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('🎁 Bonus & Reseller', 'adm_bonus', 'success')],
   [sBtn('💰 Min. Deposit/Role', 'adm_mindep', 'primary'), sBtn('📈 Margin PPOB', 'adm_margin', 'success')],
   [sBtn('📊 Jumlah Akun', 'adm_akun', 'primary')],
+  [sBtn('🔍 Review Deposit/Sewa', 'adm_review', 'primary')],
   [sBtn('📢 Broadcast Grup', 'adm_bcast', 'primary'), sBtn('📣 Broadcast User', 'adm_bcastuser', 'primary')],
   [sBtn('🔔 Grup Notifikasi', 'adm_notifgrp', 'primary'), sBtn('🔒 Force Join', 'adm_forcejoin', 'primary')],
   [sBtn('🔑 Setting ePro (HC)', 'adm_epro', 'primary'), sBtn('📲 List Preset HC', 'adm_hcpresets', 'success')],
@@ -158,7 +159,7 @@ const adminPanel = () => Markup.inlineKeyboard([
 // Teks panel admin + jumlah akun (tampil otomatis saat panel dibuka).
 async function adminPanelText() {
   try {
-    const c = vpn.countAccounts();
+    const c = await vpn.countAccounts();
     return '🛠️ <b>PANEL ADMIN</b>\n\n📊 <b>Jumlah Akun VPS ini:</b>\n' +
       `SSH: <b>${c.ssh}</b> | VMess: <b>${c.vmess}</b> | VLess: <b>${c.vless}</b>\n` +
       `Trojan: <b>${c.trojan}</b> | Shadowsocks: <b>${c.shadowsocks}</b> | Total: <b>${c.total}</b>\n\nPilih menu:`;
@@ -514,7 +515,7 @@ async function finishTrialVpn(ctx, sess, username, password = '') {
   let r;
   try {
     if (proto === 'ssh') {
-      r = viaCF ? vpn.cfSSHInfo(username, password, 1)
+      r = viaCF ? vpn.cfSSHInfo(username, password, 1, srv)
         : await vpn.createSSH(username, password, 1, 1, srv);
       if (viaCF && r.success) await vpn.createSSH(username, password, 1, 1, srv).catch(() => {});
     } else if (proto === 'vmess') r = await vpn.createVMess(username, 1, viaCF, srv);
@@ -1293,7 +1294,7 @@ async function finishCreateVpn(ctx, sess, username, password = '', days = 30) {
   try {
     if (proto === 'ssh') {
       r = viaCF
-        ? vpn.cfSSHInfo(username, password, days)
+        ? vpn.cfSSHInfo(username, password, days, srv)
         : await vpn.createSSH(username, password, days, 1, srv);
       // Untuk mode CF, akun SSH tetap dibuat di server dulu
       if (viaCF && r.success) await vpn.createSSH(username, password, days, 1, srv).catch(() => {});
@@ -2099,6 +2100,108 @@ bot.action('adm_open', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
   await sendMenuPhoto(ctx, 'menu-utama.png', await adminPanelText(), adminPanel());
+});
+
+
+// ---------- FASE 2: resolve manual deposit/sewa review/mismatch ----------
+// Setujui deposit = klaim atomik yang sama dengan poller (BEGIN IMMEDIATE +
+// guard status), jadi tidak pernah dobel kredit. Setujui sewa = status paid,
+// lalu fulfillment cron yang sudah ada mengaktifkan lisensi.
+async function approveReviewDeposit(ref) {
+  try {
+    await run('BEGIN IMMEDIATE');
+    let r = await run(
+      `UPDATE transactions SET status = 'success' WHERE ref_id = ? AND status = 'review'`,
+      [ref]
+    );
+    if (!r.changes) {
+      r = await run(
+        `UPDATE transactions SET status = 'success' WHERE ref_id = ? AND status = 'pending' AND mismatch_notified = 1`,
+        [ref]
+      );
+    }
+    if (!r.changes) { await run('ROLLBACK'); return null; }
+    const tx = await get(`SELECT * FROM transactions WHERE ref_id = ?`, [ref]);
+    await ppob.addSaldo(tx.telegram_id, tx.amount);
+    await run('COMMIT');
+    return tx;
+  } catch (e) {
+    await run('ROLLBACK').catch(() => {});
+    throw e;
+  }
+}
+
+bot.action('adm_panel', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  await ctx.reply(await adminPanelText(), { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup });
+});
+
+bot.action('adm_review', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const deps = await all(
+    `SELECT * FROM transactions WHERE type = 'deposit' AND (status = 'review' OR (status = 'pending' AND mismatch_notified = 1)) ORDER BY id DESC LIMIT 20`
+  ).catch(() => []);
+  const sewas = await sewa.reviewSewaOrders().catch(() => []);
+  let txt = '🔍 <b>REVIEW DEPOSIT / SEWA</b>\n\n';
+  const kb = [];
+  if (!deps.length && !sewas.length) txt += 'Tidak ada yang menunggu keputusan admin.';
+  for (const d of deps) {
+    txt += `💰 Deposit <code>${d.ref_id}</code> — ID <code>${d.telegram_id}</code> — Rp${Number(d.amount || 0).toLocaleString('id-ID')} — ${d.status === 'review' ? '⚠️ review (nominal tak terverifikasi)' : '⚠️ mismatch (nominal beda)'}\n`;
+    kb.push([sBtn(`✅ Setujui ${d.ref_id}`, `adm_rev_dep_ok_${d.ref_id}`, 'success'), sBtn(`❌ Tolak ${d.ref_id}`, `adm_rev_dep_no_${d.ref_id}`, 'danger')]);
+  }
+  for (const s of sewas) {
+    txt += `📦 Sewa <code>${s.payment_ref}</code> — ID <code>${s.telegram_id}</code> — ${s.days} hari — Rp${Number(s.amount || 0).toLocaleString('id-ID')} — ${s.status === 'review' ? '⚠️ review (nominal tak terverifikasi)' : '⚠️ mismatch (nominal beda)'}\n`;
+    kb.push([sBtn(`✅ Setujui ${s.payment_ref}`, `adm_rev_sewa_ok_${s.payment_ref}`, 'success'), sBtn(`❌ Tolak ${s.payment_ref}`, `adm_rev_sewa_no_${s.payment_ref}`, 'danger')]);
+  }
+  kb.push([sBtn('🔙 Kembali ke Panel Admin', 'adm_panel', 'danger')]);
+  await ctx.reply(txt, { parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
+});
+
+bot.action(/^adm_rev_dep_(ok|no)_(.+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const aksi = ctx.match[1];
+  const ref = ctx.match[2];
+  try {
+    if (aksi === 'ok') {
+      const tx = await approveReviewDeposit(ref);
+      if (!tx) return ctx.reply(`❌ Deposit <code>${ref}</code> sudah diproses / tidak ditemukan.`, { parse_mode: 'HTML' });
+      await bot.telegram.sendMessage(tx.telegram_id, `✅ <b>Deposit kamu disetujui admin.</b>\n💰 Saldo Rp${Number(tx.amount).toLocaleString('id-ID')} sudah ditambahkan.`, { parse_mode: 'HTML' }).catch(() => {});
+      return ctx.reply(`✅ Deposit <code>${ref}</code> disetujui, saldo user ditambahkan.`, { parse_mode: 'HTML' });
+    }
+    const r = await run(`UPDATE transactions SET status = 'rejected' WHERE ref_id = ? AND (status = 'review' OR (status = 'pending' AND mismatch_notified = 1))`, [ref]);
+    if (!r.changes) return ctx.reply(`❌ Deposit <code>${ref}</code> sudah diproses / tidak ditemukan.`, { parse_mode: 'HTML' });
+    const tx = await get(`SELECT telegram_id FROM transactions WHERE ref_id = ?`, [ref]);
+    if (tx) await bot.telegram.sendMessage(tx.telegram_id, `❌ <b>Deposit kamu ditolak admin.</b>\n🧾 Ref: <code>${ref}</code>\nHubungi admin bila merasa ini keliru.`, { parse_mode: 'HTML' }).catch(() => {});
+    return ctx.reply(`❌ Deposit <code>${ref}</code> ditolak.`, { parse_mode: 'HTML' });
+  } catch (e) {
+    return ctx.reply(`❌ Gagal memproses <code>${ref}</code>: ${e.message}`, { parse_mode: 'HTML' });
+  }
+});
+
+bot.action(/^adm_rev_sewa_(ok|no)_(.+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const aksi = ctx.match[1];
+  const ref = ctx.match[2];
+  try {
+    if (aksi === 'ok') {
+      const n = await sewa.resolveSewaPaid(ref);
+      if (!n) return ctx.reply(`❌ Sewa <code>${ref}</code> sudah diproses / tidak ditemukan.`, { parse_mode: 'HTML' });
+      const o = await sewa.getSewaOrder(ref);
+      if (o) await bot.telegram.sendMessage(o.telegram_id, `✅ <b>Sewa kamu disetujui admin.</b>\n📦 Lisensi ${o.days} hari sedang diproses.`, { parse_mode: 'HTML' }).catch(() => {});
+      return ctx.reply(`✅ Sewa <code>${ref}</code> disetujui, fulfillment cron akan mengaktifkan lisensi.`, { parse_mode: 'HTML' });
+    }
+    const n = await sewa.resolveSewaRejected(ref);
+    if (!n) return ctx.reply(`❌ Sewa <code>${ref}</code> sudah diproses / tidak ditemukan.`, { parse_mode: 'HTML' });
+    const o = await sewa.getSewaOrder(ref);
+    if (o) await bot.telegram.sendMessage(o.telegram_id, `❌ <b>Sewa kamu ditolak admin.</b>\n🧾 Ref: <code>${ref}</code>\nHubungi admin bila merasa ini keliru.`, { parse_mode: 'HTML' }).catch(() => {});
+    return ctx.reply(`❌ Sewa <code>${ref}</code> ditolak.`, { parse_mode: 'HTML' });
+  } catch (e) {
+    return ctx.reply(`❌ Gagal memproses <code>${ref}</code>: ${e.message}`, { parse_mode: 'HTML' });
+  }
 });
 
 bot.action('adm_akun', async (ctx) => {

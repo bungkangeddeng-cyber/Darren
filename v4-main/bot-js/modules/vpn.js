@@ -163,7 +163,7 @@ async function createSSH(username, password, days, ipLimit = 1, srv = null) {
 }
 
 // ---------- SSH via CloudFront (/cf-ssh) ----------
-function cfSSHInfo(username, password, days) {
+function cfSSHInfo(username, password, days, srv = null) {
   if (!cf.domain) return { success: false, message: '❌ Domain CloudFront belum diset (.env CF_DOMAIN).' };
   if (!validUser(username)) return { success: false, message: '❌ Username 3-20 karakter, huruf/angka saja.' };
   const exp = expiryDate(days);
@@ -386,9 +386,11 @@ async function myAccounts(telegramId) {
 
 async function createZivpn(username, password, days, srv = null) {
   if (!validUser(username)) return { success: false, message: 'Username 3-20 karakter, huruf/angka saja.' };
-  try {
-    await apiFor(srv).get('/createzivpn', { params: apiParamsFor(srv, { user: username, password, exp: days }) });
-  } catch(e) {}
+  // FASE 2: API menjawab error eksplisit untuk zivpn (API terpisah) —
+  // jangan telan error lalu kirim pesan sukses + expiry palsu.
+  const { data: dataZ } = await apiFor(srv).get('/createzivpn', { params: apiParamsFor(srv, { user: username, password, exp: days }) }).catch(() => ({ data: {} }));
+  if (dataZ?.status !== 'success')
+    return { success: false, message: `❌ Gagal membuat akun Zivpn: ${esc(dataZ?.message || 'API error')}` };
   const host = dispDomain(srv);
   const port = 5667;
   const exp = expiryDate(days);
@@ -481,7 +483,19 @@ async function listVpnPrices() {
 // ada sebagai user sistem (UID>=1000); Xray = username/email client unik per
 // protokol (WS dan gRPC digabung per nama); entri template tanpa nama tidak dihitung.
 // config.json Xray bukan JSON murni (baris marker #...), jadi marker dibuang dulu.
-function countAccounts() {
+async function countAccounts(srv = null) {
+  // FASE 2: hitung dari server terpilih via API (/countaccounts), bukan
+  // file lokal host bot (salah di multi-server). Fallback baca lokal
+  // hanya bila srv null (bot jalan di host server utama); server jauh
+  // yang API-nya gagal = nol, bukan angka lokal yang menyesatkan.
+  try {
+    const { data } = await apiFor(srv).get('/countaccounts', { params: apiParamsFor(srv, {}) });
+    if (data?.status === 'success' && data?.counts) {
+      const c = data.counts;
+      return { ssh: c.ssh || 0, vmess: c.vmess || 0, vless: c.vless || 0, trojan: c.trojan || 0, shadowsocks: c.shadowsocks || 0, total: c.total || 0 };
+    }
+  } catch (_) {}
+  if (srv && srv.id) return { ssh: 0, vmess: 0, vless: 0, trojan: 0, shadowsocks: 0, total: 0 };
   const fs = require("fs");
   const counts = { ssh: 0, vmess: 0, vless: 0, trojan: 0, shadowsocks: 0, total: 0 };
   try {

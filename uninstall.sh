@@ -55,6 +55,10 @@ hapus_stack_darren() {
   # main() di bawah, atau siapkan_install_total() di install.sh) supaya
   # unit lama yang menimpa ExecStart tidak selamat dari uninstall/--total.
   rm -rf /etc/systemd/system/xray.service.d
+  # FASE 2: service + script limit (dipasang installer dari Fls lokal) ikut dihapus.
+  systemctl disable --now limitvmess limitvless limittrojan limitshadowsocks 2>/dev/null || true
+  rm -f /etc/systemd/system/limitvmess.service /etc/systemd/system/limitvless.service /etc/systemd/system/limittrojan.service /etc/systemd/system/limitshadowsocks.service
+  rm -f /etc/xray/limit.vmess /etc/xray/limit.vless /etc/xray/limit.trojan /etc/xray/limit.shadowsocks
   systemctl daemon-reload 2>/dev/null || true
 
   # 3. Menu (daftar file persis dari menu.zip bila ada; dibaca SEBELUM
@@ -149,6 +153,19 @@ main() {
   mkdir -p "$BAK"
   for d in /root/bot-js /etc/vpn-api /etc/xray /etc/systemd/system/xray.service.d; do
     if [ -e "$d" ]; then cp -a "$d" "$BAK/" 2>/dev/null || echo "Backup $d gagal, lanjut."; fi
+  done
+  # FASE 2: backup lebih lengkap — API, unit systemd, entry point menu.
+  [ -f /root/vpn-api.py ] && cp -a /root/vpn-api.py "$BAK/" 2>/dev/null || true
+  for _unit in vpn-api.service xray.service limitvmess.service limitvless.service limittrojan.service limitshadowsocks.service; do
+    [ -f "/etc/systemd/system/$_unit" ] && cp -a "/etc/systemd/system/$_unit" "$BAK/" 2>/dev/null || true
+  done
+  for _menu in menu cek-izin xray-restart; do
+    [ -f "/usr/bin/$_menu" ] && cp -a "/usr/bin/$_menu" "$BAK/" 2>/dev/null || true
+  done
+  # FASE 2: retensi — simpan 5 backup terbaru, hapus yang lebih lama.
+  # Hanya direktori darren-*-backup-* di /root; tidak pernah yang lain.
+  for _old in $(ls -dt /root/darren-*-backup-*/ 2>/dev/null | tail -n +6); do
+    rm -rf "$_old"
   done
   echo "Backup di: $BAK"
 

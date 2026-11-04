@@ -96,6 +96,26 @@ async function markSewaFulfilled(ref, expiry) {
   await run(`UPDATE sewa_orders SET status = 'fulfilled', expiry = ? WHERE payment_ref = ? AND status = 'paid'`, [expiry, ref]);
 }
 
+// FASE 2: resolve manual oleh admin (lihat app.js adm_review).
+// Klaim guarded: review -> paid, atau pending+mismatch -> paid. Setelah
+// paid, fulfillment cron yang sudah ada (pendingSewaOrders) mengaktifkan
+// lisensi; tolak -> rejected (poller berhenti memproses keduanya).
+async function resolveSewaPaid(ref) {
+  let r = await run(`UPDATE sewa_orders SET status = 'paid' WHERE payment_ref = ? AND status = 'review'`, [ref]);
+  if (!(r.changes || 0))
+    r = await run(`UPDATE sewa_orders SET status = 'paid' WHERE payment_ref = ? AND status = 'pending' AND mismatch_notified = 1`, [ref]);
+  return r.changes || 0;
+}
+
+async function resolveSewaRejected(ref) {
+  const r = await run(`UPDATE sewa_orders SET status = 'rejected' WHERE payment_ref = ? AND (status = 'review' OR (status = 'pending' AND mismatch_notified = 1))`, [ref]);
+  return r.changes || 0;
+}
+
+async function reviewSewaOrders() {
+  return all(`SELECT * FROM sewa_orders WHERE status = 'review' OR (status = 'pending' AND mismatch_notified = 1) ORDER BY id DESC LIMIT 20`);
+}
+
 async function getSewaOrder(ref) {
   return get(`SELECT * FROM sewa_orders WHERE payment_ref = ?`, [ref]);
 }
@@ -128,5 +148,6 @@ function packageListText() {
 module.exports = {
   PACKAGES, initTable, createSewaOrder, checkSewaPayment,
   markSewaPaid, markSewaExpired, markSewaReview, markSewaFulfilled, getSewaOrder,
+  resolveSewaPaid, resolveSewaRejected, reviewSewaOrders,
   mySewaOrders, pendingSewaOrders, validUsername, validIp, packageListText,
 };
