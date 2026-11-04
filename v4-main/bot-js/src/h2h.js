@@ -35,7 +35,9 @@ function unwrap(body) {
 }
 
 function pickAmount(p) {
-  const v = p?.amount ?? p?.totalAmount ?? p?.paidAmount ?? p?.uniqueAmount ?? null;
+  const v = p?.amount ?? p?.totalAmount ?? p?.paidAmount ?? p?.uniqueAmount
+    ?? p?.transaction?.amount ?? p?.transaction?.paid_amount ?? p?.transaction?.paidAmount
+    ?? p?.transaction?.totalAmount ?? p?.transaction?.total_amount ?? null;
   return v == null ? null : Number(v);
 }
 
@@ -57,14 +59,14 @@ function errMessage(status) {
 // Gagal total -> { qrBuffer: null, qrUrl: null } (pemanggil kirim teks saja).
 async function resolveQr(p, baseUrl, apiKey) {
   try {
-    const str = p?.qr_string ?? p?.qris_string ?? p?.qrString ?? p?.qrisString
+    const str = p?.qr_string ?? p?.qris_string ?? p?.qrString ?? p?.qrisString ?? p?.qris_code ?? p?.qr_code ?? p?.qris_data
       ?? p?.qr_content ?? p?.qrContent ?? (typeof p?.qr === 'string' ? p.qr : null)
       ?? (typeof p?.string === 'string' ? p.string : null);
     if (str) {
       const buf = await QRCode.toBuffer(String(str));
       return { qrBuffer: buf, qrUrl: null };
     }
-    const img = p?.qrImage ?? p?.qr_image ?? p?.qrUrl ?? p?.qr_url
+    const img = p?.qrImage ?? p?.qr_image ?? p?.qr_image_url ?? p?.qrUrl ?? p?.qr_url
       ?? p?.qrisUrl ?? p?.qris_url ?? p?.qr_code_url ?? p?.imageUrl ?? null;
     if (img) {
       let url = String(img);
@@ -77,13 +79,18 @@ async function resolveQr(p, baseUrl, apiKey) {
       } else {
         return { qrBuffer: null, qrUrl: null };
       }
-      const res = await axios.get(url, {
-        responseType: 'arraybuffer', timeout: 20000,
-        headers: withKey ? { 'x-api-key': apiKey } : {},
-      });
-      return { qrBuffer: Buffer.from(res.data), qrUrl: url };
+      try {
+        const res = await axios.get(url, {
+          responseType: 'arraybuffer', timeout: 20000,
+          headers: withKey ? { 'x-api-key': apiKey } : {},
+        });
+        return { qrBuffer: Buffer.from(res.data), qrUrl: url };
+      } catch (e) {
+        console.error('[h2h] unduh gambar QR gagal, kirim URL saja:', url.split('?')[0]);
+        return { qrBuffer: null, qrUrl: url };
+      }
     }
-  } catch (_) { /* jatuh ke null di bawah */ }
+  } catch (e) { console.error('[h2h] resolveQr gagal total:', e?.message || ''); }
   return { qrBuffer: null, qrUrl: null };
 }
 

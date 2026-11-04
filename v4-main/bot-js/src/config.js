@@ -48,6 +48,14 @@ module.exports = {
     apiKey: process.env.H2H_API_KEY || '',
   },
 
+  webhook: {
+    // Receiver webhook deposit (Fase 1) — loopback saja.
+    // secret = secret webhook akun gateway operator, dari env di server.
+    // Tanpa secret, receiver menolak semua (503 fail-closed).
+    secret: process.env.WEBHOOK_SECRET || '',
+    port: num(process.env.WEBHOOK_PORT, 8899),
+  },
+
   hcApiKey: process.env.HC_API_KEY || '',
 
   sidompul: {

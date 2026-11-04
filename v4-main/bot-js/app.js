@@ -21,6 +21,8 @@ const GROUP_NOTIF = ''; // ID grup notifikasi diatur via panel admin; kosong = n
 const { init: initDb } = require('./src/db');
 const vpn = require('./modules/vpn');
 const srvTools = require('./modules/servers');
+const liveServer = require('./src/live-server');
+const apiSettings = require('./src/api-settings');
 const ppob = require('./modules/ppob');
 const h2h = require('./src/h2h');
 const kuota = require('./modules/kuota');
@@ -141,6 +143,8 @@ const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('💲 Edit Harga', 'adm_editharga', 'primary'), sBtn('📝 Edit Nama', 'adm_editnama', 'primary')],
   [sBtn('💲 Harga VPN/Role', 'adm_vpnprices', 'primary'), sBtn('👥 Kelola Role', 'adm_roles', 'primary')],
   [sBtn('🌐 Edit Domain', 'adm_editdomain', 'primary'), sBtn('📋 List Server', 'adm_listserver', 'success')],
+  [sBtn('🖥️ Live Server', 'adm_liveserver', 'success')],
+  [sBtn('⚙️ Pengaturan & API Key', 'adm_api', 'primary')],
   [sBtn('🔌 Edit API Base', 'adm_editapi', 'primary')],
   [sBtn('🔑 Edit API Key', 'adm_editkey', 'primary')],
   [sBtn('💵 Tambah Saldo', 'adm_addsaldo', 'success'), sBtn('➖ Kurangi Saldo', 'adm_minsaldo', 'danger')],
@@ -562,6 +566,24 @@ bot.on('text', async (ctx) => {
     return goMainMenu(ctx);
   }
 
+  // --- Session input Pengaturan & API Key ---
+  if (sess?.step === 'adm_api_input') {
+    if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
+    const field = sess.data?.field;
+    const value = ctx.message.text.trim();
+    sessions.delete(chatId);
+    const f = apiSettings.FIELDS.find((x) => x.key === field);
+    if (!f) return ctx.reply('❌ Field tidak dikenal.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+    if (!value) return ctx.reply('❌ Nilai tidak boleh kosong.', { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+    try {
+      apiSettings.setKey(field, value);
+    } catch (e) {
+      return ctx.reply(`❌ Gagal menyimpan: ${esc(e.message)}`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+    }
+    if (f.secret) { try { await ctx.deleteMessage(ctx.message.message_id); } catch (_) {} }
+    const shown = f.secret ? apiSettings.mask(value) : esc(value);
+    return ctx.reply(`✅ <b>${esc(f.label)}</b> tersimpan${f.secret ? ` (<code>${shown}</code>)` : `: <code>${shown}</code>`}. Berlaku setelah Terapkan &amp; Restart.`, { parse_mode: 'HTML', reply_markup: apiMenuKb() });
+  }
   // --- Session input API key ePro ---
   if (sess?.step === 'adm_epro_key') {
     const apiKey = ctx.message.text.trim();
@@ -2413,6 +2435,85 @@ bot.action('adm_listserver', async (ctx) => {
 });
 
 // Kembali ke panel admin
+// Live Server (Fase 3): status lokal + server tambahan, admin-only.
+async function liveServerText() {
+  const local = await liveServer.checkLocal();
+  const rows = await getServers().catch(() => []);
+  const remotes = await Promise.all(rows.map(async (s) => ({ server: s, health: await liveServer.checkRemote(s) })));
+  return liveServer.formatStatus(local, remotes);
+}
+const liveServerKb = () => ({ inline_keyboard: [[sBtn('🔄 Refresh', 'adm_liveserver_refresh', 'primary'), sBtn('🔙 Kembali', 'adm_back', 'danger')]] });
+bot.action('adm_liveserver', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  await ctx.reply(await liveServerText(), { parse_mode: 'HTML', reply_markup: liveServerKb() });
+});
+bot.action('adm_liveserver_refresh', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const text = await liveServerText();
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: liveServerKb() });
+  } catch (_) {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: liveServerKb() });
+  }
+});
+// Pengaturan & API Key (menu lengkap, input via Telegram).
+function apiMenuText() {
+  const st = apiSettings.getStatus();
+  const lines = ['⚙️ <b>PENGATURAN &amp; API KEY</b>\n'];
+  for (const f of st) {
+    lines.push(`${f.filled ? '✅' : '❌'} <b>${f.label}</b>${f.filled && !f.secret ? `: <code>${esc(f.value)}</code>` : (f.filled ? ': terisi' : ': kosong')}`);
+  }
+  const url = apiSettings.webhookUrl();
+  lines.push('');
+  lines.push(`🔗 <b>URL Webhook Deposit:</b>\n${url ? `<code>${esc(url)}</code>` : '<i>domain belum diset — input Domain VPN dulu</i>'}`);
+  lines.push('\n<i>Kunci/secret tidak pernah ditampilkan di sini. Setelah input kunci/secret, hapus pesan itu dari chat. Perubahan berlaku setelah Terapkan &amp; Restart.</i>');
+  return lines.join('\n');
+}
+const apiMenuKb = () => ({ inline_keyboard: [
+  [sBtn('🌐 Input Domain VPN', 'adm_api_VPN_DOMAIN', 'primary'), sBtn('🔗 Input URL Gateway', 'adm_api_H2H_BASE_URL', 'primary')],
+  [sBtn('🔑 Input Kunci Gateway', 'adm_api_H2H_API_KEY', 'primary'), sBtn('🤫 Input Secret Webhook', 'adm_api_WEBHOOK_SECRET', 'primary')],
+  [sBtn('👤 Input User Digiflazz', 'adm_api_DIGIFLAZZ_USERNAME', 'primary'), sBtn('🔑 Input Kunci Digiflazz', 'adm_api_DIGIFLAZZ_API_KEY', 'primary')],
+  [sBtn('🔗 URL Webhook', 'adm_api_url', 'primary'), sBtn('🔄 Terapkan &amp; Restart Bot', 'adm_api_apply', 'success')],
+  [sBtn('🔙 Kembali', 'adm_back', 'danger')],
+] });
+bot.action('adm_api', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  sessions.delete(ctx.chat.id);
+  try { await ctx.editMessageText(apiMenuText(), { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+  catch (_) { await ctx.reply(apiMenuText(), { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+});
+bot.action(/^adm_api_(VPN_DOMAIN|H2H_BASE_URL|H2H_API_KEY|WEBHOOK_SECRET|DIGIFLAZZ_USERNAME|DIGIFLAZZ_API_KEY)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const field = ctx.match[1];
+  const label = (apiSettings.FIELDS.find((f) => f.key === field) || {}).label || field;
+  sessions.set(ctx.chat.id, { step: 'adm_api_input', data: { field } });
+  await ctx.reply(`✏️ <b>Input ${esc(label)}</b>\n\nKetik nilainya sekarang (satu baris, tanpa spasi). Ketik <code>batal</code> untuk membatalkan.\n<i>Untuk kunci/secret: setelah terkirim, hapus pesan itu dari chat.</i>`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[sBtn('🔙 Kembali', 'adm_api', 'danger')]] } });
+});
+bot.action('adm_api_url', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  sessions.delete(ctx.chat.id);
+  const url = apiSettings.webhookUrl();
+  const st = apiSettings.getStatus();
+  const sec = st.find((f) => f.key === 'WEBHOOK_SECRET');
+  const h2h = st.find((f) => f.key === 'H2H_API_KEY');
+  const text = url
+    ? `🔗 <b>URL WEBHOOK DEPOSIT</b>\n\n<code>${esc(url)}</code>\n\nEvents: <code>payment.success</code>, <code>payment.expired</code>\nSecret webhook: ${sec && sec.filled ? '✅ terisi' : '❌ kosong — input dulu'}\nKunci gateway: ${h2h && h2h.filled ? '✅ terisi' : '❌ kosong'}\n\n<i>Daftarkan URL ini di gateway (panel /webhook) dengan secret yang sama seperti di bot. Pendaftaran otomatis dari bot belum tersedia karena admin API gateway hanya loopback di Biznet.</i>`
+    : '❌ <b>Domain VPN belum diset.</b> Input Domain VPN dulu, lalu buka lagi URL Webhook.';
+  try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+  catch (_) { await ctx.reply(text, { parse_mode: 'HTML', reply_markup: apiMenuKb() }); }
+});
+bot.action('adm_api_apply', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  sessions.delete(ctx.chat.id);
+  await ctx.reply('🔄 <b>Menerapkan &amp; me-restart bot...</b> Tunggu beberapa detik, lalu cek panel admin lagi.', { parse_mode: 'HTML' });
+  setTimeout(() => { try { require('child_process').exec('pm2 restart ripzz-bot-js'); } catch (_) {} }, 800);
+});
 bot.action('adm_back', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
@@ -3471,6 +3572,13 @@ bot.command('restoredb', async (ctx) => {
     { parse_mode: 'HTML' }
   );
   sessions.set(ctx.chat.id, { step: 'restore_db' });
+});
+
+// Receiver webhook deposit (Fase 1) — loopback saja, belum diekspos publik.
+require('./src/webhook').start({
+  bot, ppob, settings, digi, esc, notifGrup,
+  db: require('./src/db'),
+  secret: config.webhook.secret, port: config.webhook.port,
 });
 
 bot.launch();
