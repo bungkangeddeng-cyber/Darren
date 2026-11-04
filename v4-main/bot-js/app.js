@@ -2504,7 +2504,7 @@ const apiMenuKb = () => ({ inline_keyboard: [
   [sBtn('👤 Input User Digiflazz', 'adm_api_DIGIFLAZZ_USERNAME', 'primary'), sBtn('🔑 Input Kunci Digiflazz', 'adm_api_DIGIFLAZZ_API_KEY', 'primary')],
   [sBtn('🔗 URL Webhook', 'adm_api_url', 'primary'), sBtn('🔄 Terapkan &amp; Restart Bot', 'adm_api_apply', 'success')],
   [sBtn('📡 Daftarkan Webhook', 'adm_api_register', 'success')],
-  [sBtn('👁️ Tampilkan Secret 10 Detik', 'adm_api_showsecret', 'warning')],
+  [sBtn('👁️ Tampilkan Secret 10 Detik', 'adm_api_showsecret', 'primary')],
   [sBtn('🔙 Kembali', 'adm_back', 'danger')],
 ] });
 async function replyApiMenu(ctx, text) {
@@ -3602,9 +3602,11 @@ bot.command('syncproduk', async (ctx) => {
 });
 
 // ---------- Error handler ----------
-bot.catch((err, ctx) => {
+bot.catch(async (err, ctx) => {
   console.error('Bot error:', err.message);
-  ctx?.reply?.('❌ Terjadi kesalahan. Coba lagi.').catch(() => {});
+  let msg = '❌ Terjadi kesalahan. Coba lagi.';
+  try { if (ctx && await admin.hasAdminAccess(ctx)) msg = `❌ Terjadi kesalahan: ${esc(String(err.message || err)).slice(0, 200)}`; } catch (_) {}
+  ctx?.reply?.(msg).catch(() => {});
 });
 
 // ---------- Start ----------
