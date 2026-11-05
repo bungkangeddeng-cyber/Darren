@@ -1029,6 +1029,11 @@ if systemctl is-active --quiet nginx; then
 else
   echo "GAGAL: nginx tidak aktif." >&2; VERIFY_FAIL=1
 fi
+if grep -q 'location /webhook/deposit' /etc/nginx/conf.d/xray.conf 2>/dev/null; then
+  echo "OK: nginx :81 meneruskan /webhook/deposit ke receiver bot (127.0.0.1:8899)"
+else
+  echo "PERINGATAN: /webhook/deposit tidak ada di nginx :81 — deposit webhook tidak akan sampai ke bot (poller 30 detik tetap jalan)." >&2
+fi
 if [ "${TLS_STATUS:-pending}" = "ready" ]; then
   if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
     echo "OK: haproxy -c lolos"
