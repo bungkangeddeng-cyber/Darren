@@ -1,0 +1,13 @@
+[Unit]
+Description=TLS router (:443 decrypted stream -> sshd or nginx)
+After=network.target nginx.service ssh.service
+Wants=nginx.service ssh.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/tls-router.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

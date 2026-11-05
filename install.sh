@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261105-06
+# DARREN_INSTALLER_VERSION=fix-total-20261105-07
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
@@ -29,7 +29,7 @@ set -euo pipefail
 # script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # B15: penanda versi (grep DARREN_INSTALLER_VERSION).
-DARREN_INSTALLER_VERSION="fix-total-20261105-06"
+DARREN_INSTALLER_VERSION="fix-total-20261105-07"
 # B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
 # rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
 # ubah konstanta ini + README, lalu uji live ulang.
@@ -920,12 +920,27 @@ if [ -f "$SRC_DIR/v4-main/Fls/ws" ] && [ -f "$SRC_DIR/v4-main/Cfg/tun.conf" ] &&
   else
     echo "PERINGATAN: Cfg/ws-bridge.py atau Cfg/ws-bridge.service tidak ada di repo — nginx mengarah ke :10018 yang kosong, SSH lewat 80/443 akan 502." >&2
   fi
+  # tls-router 127.0.0.1:10019 (backend :443 haproxy). Aliran terdekripsi
+  # :443 bisa dua macam: upgrade WS (HTTP) -> nginx :1010, atau SSH mentah
+  # ("SSH-2.0-easyPro..." tanpa upgrade) -> sshd :22 langsung. Tanpa router,
+  # SSH mentah ditolak nginx 400. Router mengintip 4 byte pertama lalu
+  # meneruskan utuh; bila ragu, ke nginx (perilaku lama).
+  if [ -f "$SRC_DIR/v4-main/Cfg/tls-router.py" ] && [ -f "$SRC_DIR/v4-main/Cfg/tls-router.service" ]; then
+    install -m 755 "$SRC_DIR/v4-main/Cfg/tls-router.py" /usr/local/bin/tls-router.py
+    cp -a "$SRC_DIR/v4-main/Cfg/tls-router.service" /etc/systemd/system/tls-router.service
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable tls-router 2>/dev/null || true
+    systemctl restart tls-router 2>/dev/null || systemctl start tls-router 2>/dev/null || echo "PERINGATAN: tls-router gagal start — haproxy :443 (tls_backend :10019) akan menolak semua koneksi SSL." >&2
+  else
+    echo "PERINGATAN: Cfg/tls-router.py atau Cfg/tls-router.service tidak ada di repo — haproxy :443 mengarah ke :10019 yang kosong, SSH SSL 443 akan gagal." >&2
+  fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable ws 2>/dev/null || true
   systemctl restart ws 2>/dev/null || systemctl start ws 2>/dev/null || echo "PERINGATAN: ws gagal start — SSH lewat 80/443 akan 502." >&2
   if ss -ltn 2>/dev/null | grep -q ':10015 '; then echo "OK: ws mendengarkan :10015 (SSH lewat 80/443 hidup)."; else echo "PERINGATAN: :10015 tidak mendengarkan — cek systemctl status ws." >&2; fi
   if ss -ltn 2>/dev/null | grep -q ':10017 '; then echo "OK: ws-shield mendengarkan :10017 (perisai payload hidup)."; else echo "PERINGATAN: :10017 tidak mendengarkan — cek systemctl status ws-shield." >&2; fi
   if ss -ltn 2>/dev/null | grep -q ':10018 '; then echo "OK: ws-bridge mendengarkan :10018 (handshake WS RFC6455 hidup)."; else echo "PERINGATAN: :10018 tidak mendengarkan — cek systemctl status ws-bridge." >&2; fi
+  if ss -ltn 2>/dev/null | grep -q ':10019 '; then echo "OK: tls-router mendengarkan :10019 (SSH mentah/WS :443 hidup)."; else echo "PERINGATAN: :10019 tidak mendengarkan — cek systemctl status tls-router." >&2; fi
 else
   echo "PERINGATAN: Fls/ws, Cfg/tun.conf, atau Fls/ws.service tidak ada di repo — SSH lewat 80/443 tidak terpasang." >&2
 fi

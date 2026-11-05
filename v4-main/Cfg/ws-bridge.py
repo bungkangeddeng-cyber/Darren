@@ -98,6 +98,7 @@ def handle_client(conn, addr):
         # Sambung ke shield, teruskan sisa byte yang sudah tiba (pipelined).
         target = socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=10)
         if rest:
+            log(f"{addr} rest({len(rest)}): {rest[:80]!r}")
             target.sendall(rest)
 
         def pump(src, dst):
