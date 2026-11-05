@@ -11,17 +11,26 @@ Bridge ini:
   - baca request upgrade, hitung Sec-WebSocket-Accept yang benar
     (SHA1(kunci + GUID RFC6455), base64), balas 101 lengkap:
       Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Accept
+  - LENIEN: bila request TANPA Sec-WebSocket-Key (aplikasi HP user
+    mengirim upgrade minimal tanpa kunci), JANGAN ditolak — balas 101
+    lengkap dengan Accept dummy (dihitung dari kunci acak) lalu tetap
+    jembatani. Menolaknya justru mematikan jalur yang sebelumnya jalan
+    lewat ws (ws menerima apa saja). Klien ketat yang mengirim kunci
+    tetap mendapat Accept yang benar dan tervalidasi.
   - sesudah handshake, jembatani byte mentah dua arah ke ws-shield
     (127.0.0.1:10017), yang tetap bertugas membuang junk sampai banner
     SSH-2.0- lalu meneruskan ke sshd :22.
   - byte yang sudah tiba bersamaan dengan request upgrade (pipelined)
     diteruskan sebagai awal aliran SSH, tidak dibuang.
+  - timeout baca header (10 dtk) DICABUT sesudah handshake, supaya sesi
+    SSH yang idle tidak ikut mati.
 
 Jalur OVPN (:1012 -> ws :10012) TIDAK disentuh.
 Log ke stdout (journal ws-bridge).
 """
 import base64
 import hashlib
+import os
 import socket
 import threading
 import time
@@ -58,20 +67,29 @@ def handle_client(conn, addr):
         if head is None:
             conn.close()
             return
+        # Matikan timeout baca-header: sesi SSH idle tidak boleh mati.
+        conn.settimeout(None)
+        lines = head.decode("latin-1", "replace").split("\r\n")
+        reqline = lines[0] if lines else ""
         # Cari Sec-WebSocket-Key (case-insensitive).
         key = None
-        for line in head.decode("latin-1", "replace").split("\r\n"):
+        for line in lines[1:]:
             if ":" in line:
                 name, _, value = line.partition(":")
                 if name.strip().lower() == "sec-websocket-key":
                     key = value.strip()
                     break
-        if not key:
-            log(f"{addr} tolak: tanpa Sec-WebSocket-Key")
-            conn.close()
-            return
-        accept = base64.b64encode(
-            hashlib.sha1((key + GUID).encode()).digest()).decode()
+        if key:
+            accept = base64.b64encode(
+                hashlib.sha1((key + GUID).encode()).digest()).decode()
+        else:
+            # LENIEN: tanpa kunci, pakai Accept dummy (kunci acak) dan
+            # tetap jembatani; catat request-nya untuk diagnosis.
+            dummy = base64.b64encode(os.urandom(16)).decode()
+            accept = base64.b64encode(
+                hashlib.sha1((dummy + GUID).encode()).digest()).decode()
+            hdrs = " | ".join(l for l in lines[1:] if l)
+            log(f"{addr} tanpa kunci, Accept dummy. req: {reqline} | {hdrs[:240]}")
         resp = ("HTTP/1.1 101 Switching Protocols\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
