@@ -3,6 +3,7 @@
 // Membuat akun via API server VPN, format output siap copy.
 // ============================================================
 const axios = require('axios');
+const fs = require('fs');
 const config = require('../src/config');
 const { run, get, all } = require('../src/db');
 const { esc } = require('../src/format');
@@ -59,9 +60,9 @@ function expiryDate(days) {
 // (8443, 8080, 2086, 8880, UDPSSH 1-65535, DNS 53, BadVPN 7300) sengaja
 // TIDAK ditampilkan: 8443 tidak mendengarkan di Aji02, 53/7300 hanya
 // localhost, dan servis 8080/2086/8880 tidak terverifikasi sebagai
-// layanan VPN. Save-account TIDAK ditampilkan: API bot tidak menulis
-// file /var/www/html/*.txt (file itu hanya ditulis menu server), jadi
-// link :81 akan mati (404) untuk akun buatan bot.
+// Save-account disisipkan handler (attachSave) hanya bila file
+// benar-benar tertulis di /var/www/html (server lokal); server remote
+// tidak dibuatkan file supaya link :81 tidak 404.
 const FANCY_TOP = '╭━━━━━━━━━━━━━━━━━━━━━━╮';
 const FANCY_BOT = '╰━━━━━━━━━━━━━━━━━━━━━━╯';
 const FANCY_SEP = '━━━━━━━━━━━━━━━━━━━━━━';
@@ -70,6 +71,7 @@ const FANCY_TITLES = {
   vmess: '🚀 ᴠᴍᴇꜱꜱ ᴀᴄᴄᴏᴜɴᴛ',
   vless: '🚀 ᴠʟᴇꜱꜱ ᴀᴄᴄᴏᴜɴᴛ',
   trojan: '🚀 ᴛʀᴏᴊᴀɴ ᴀᴄᴄᴏᴜɴᴛ',
+  shadowsocks: '🚀 ꜱʜᴀᴅᴏᴡꜱᴏᴄᴋꜱ ᴀᴄᴄᴏᴜɴᴛ',
 };
 
 function fancyBox(d) {
@@ -103,7 +105,7 @@ function fancyBox(d) {
   if (d.proto === 'ssh') {
     const ports = d.viaCF
       ? ['┌〔 🔌 ᴘᴏʀᴛ 〕', '└ 🔐 TLS : 443']
-      : ['┌〔 🔌 ᴘᴏʀᴛ 〕', '├ 🔐 TLS : 443', '├ 🌐 HTTP : 80', '├ ⚡ OpenSSH : 22', '└ 📡 Dropbear : 109, 143'];
+      : ['┌〔 🔌 ᴘᴏʀᴛ 〕', '├ 🔐 TLS : 443', '├ 🌐 HTTP : 80', '└ ⚡ OpenSSH : 22'];
     lines.push(ports.join('\n'));
     lines.push('');
     lines.push(FANCY_SEP);
@@ -118,21 +120,32 @@ function fancyBox(d) {
     lines.push(`<code>${d.payload}</code>`);
   } else {
     lines.push('┌〔 🔌 ᴘᴏʀᴛ 〕');
-    lines.push('└ 🔐 TLS : 443');
+    lines.push('├ 🔐 TLS : 443');
+    lines.push('└ 🌐 HTTP : 80');
     lines.push('');
     lines.push(FANCY_SEP);
     lines.push('');
-    lines.push('🔗 ʟɪɴᴋ');
-    lines.push('');
-    lines.push(`<code>${d.link}</code>`);
-    lines.push('');
+    const links = d.links || (d.link ? { tls: d.link } : {});
+    if (links.tls) { lines.push('🔗 ᴜʀʟ ᴛʟꜱ'); lines.push(''); lines.push(`<pre>${links.tls}</pre>`); lines.push(''); }
+    if (links.http) { lines.push('🔗 ᴜʀʟ ʜᴛᴛᴘ'); lines.push(''); lines.push(`<pre>${links.http}</pre>`); lines.push(''); }
+    if (links.grpc) { lines.push('🔗 ᴜʀʟ ɢʀᴘᴄ'); lines.push(''); lines.push(`<pre>${links.grpc}</pre>`); lines.push(''); }
     lines.push(FANCY_SEP);
     lines.push('');
     lines.push('┌〔 🌐 ᴡꜱ ᴅᴇᴛᴀɪʟ 〕');
     lines.push(`├ 🌐 Host : <code>${esc(d.host)}</code>`);
     lines.push('├ 🔐 Port TLS : 443');
+    lines.push('├ 🌐 Port HTTP : 80');
     lines.push(`├ 🛣️ Path : <code>${esc(d.wsPath)}</code>`);
     lines.push(`└ 🔑 SNI : <code>${esc(d.host)}</code>`);
+    if (d.grpcService) {
+      lines.push('');
+      lines.push('┌〔 🌐 ɢʀᴘᴄ ᴅᴇᴛᴀɪʟ 〕');
+      lines.push(`├ 🌐 Host : <code>${esc(d.host)}</code>`);
+      lines.push('├ 🔐 Port : 443');
+      lines.push(`├ 🛣️ ServiceName : <code>${esc(d.grpcService)}</code>`);
+      lines.push(`└ 🔑 SNI : <code>${esc(d.host)}</code>`);
+    }
+    if (d.method) { lines.push(''); lines.push(`🔐 Method : <code>${esc(d.method)}</code>`); }
   }
   lines.push('');
   lines.push(FANCY_SEP);
@@ -145,6 +158,110 @@ function fancyBox(d) {
   return lines.join('\n');
 }
 
+
+
+const PROTO_WS_PATH = { vmess: '/vmess', vless: '/vless', trojan: '/trojan', shadowsocks: '/ss-ws' };
+const PROTO_GRPC = { vmess: 'vmess-grpc', vless: 'vless-grpc', trojan: 'trojan-grpc', shadowsocks: 'ss-grpc' };
+
+function buildXrayLinks(proto, remark, secret, host, wsPath) {
+  const wp = wsPath || PROTO_WS_PATH[proto] || '';
+  const grpc = PROTO_GRPC[proto] || '';
+  if (proto === 'vmess') {
+    return {
+      tls: vmessLink(secret, remark, host, 443, wp, true),
+      http: vmessLink(secret, remark, host, 80, wp, false),
+      grpc: vmessLink(secret, remark, host, 443, grpc, true, 'grpc'),
+    };
+  }
+  if (proto === 'vless') {
+    return {
+      tls: `vless://${secret}@${host}:443?encryption=none&security=tls&sni=${host}&type=ws&path=${encodeURIComponent(wp)}&host=${host}#${remark}`,
+      http: `vless://${secret}@${host}:80?encryption=none&security=none&type=ws&path=${encodeURIComponent(wp)}&host=${host}#${remark}`,
+      grpc: `vless://${secret}@${host}:443?encryption=none&security=tls&sni=${host}&type=grpc&serviceName=${grpc}#${remark}`,
+    };
+  }
+  if (proto === 'trojan') {
+    return {
+      tls: `trojan://${secret}@${host}:443?security=tls&sni=${host}&type=ws&path=${encodeURIComponent(wp)}&host=${host}#${remark}`,
+      http: `trojan://${secret}@${host}:80?security=none&type=ws&path=${encodeURIComponent(wp)}&host=${host}#${remark}`,
+      grpc: `trojan://${secret}@${host}:443?security=tls&sni=${host}&type=grpc&serviceName=${grpc}#${remark}`,
+    };
+  }
+  if (proto === 'shadowsocks') {
+    const method = 'aes-256-gcm';
+    return {
+      tls: ssLink(method, secret, host, 443, remark, `v2ray-plugin;tls;host=${host};path=${wp}`),
+      http: ssLink(method, secret, host, 80, remark, `v2ray-plugin;host=${host};path=${wp}`),
+      grpc: ssLink(method, secret, host, 443, remark, `v2ray-plugin;tls;mode=grpc;serviceName=${grpc};host=${host}`),
+    };
+  }
+  return null;
+}
+
+function stripHtml(x) { return String(x || '').replace(/<[^>]*>/g, ''); }
+function isLocalServer(srv) { return dispDomain(srv) === domain; }
+function writeSaveFile(proto, username, txt, hostDomain) {
+  if (!hostDomain) return null;
+  try {
+    fs.writeFileSync(`/var/www/html/${proto}-${username}.txt`, txt, { mode: 0o644 });
+    return `http://${hostDomain}:81/${proto}-${username}.txt`;
+  } catch { return null; }
+}
+function deleteSaveFile(proto, username) {
+  try { fs.unlinkSync(`/var/www/html/${proto}-${username}.txt`); } catch {}
+}
+// Sisipkan SAVE ACCOUNT ke pesan (sebelum baris sukses). Hanya untuk
+// SSH/Xray di server lokal; server remote tidak dibuatkan file supaya
+// link tidak 404. Pesan gagal / protokol lain tidak diubah.
+function attachSave(proto, username, message, srv) {
+  if (!['ssh', 'vmess', 'vless', 'trojan', 'shadowsocks'].includes(proto)) return { message, saveUrl: null };
+  if (!isLocalServer(srv)) return { message, saveUrl: null };
+  const saveUrl = writeSaveFile(proto, username, stripHtml(message), dispDomain(srv));
+  if (!saveUrl) return { message, saveUrl: null };
+  const section = `💾 ꜱᴀᴠᴇ ᴀᴄᴄᴏᴜɴᴛ\n\n<code>${esc(saveUrl)}</code>\n\n`;
+  const marker = '🎉 ᴀᴋᴜɴ ʙᴇʀʜᴀꜱɪʟ ᴅɪʙᴜᴀᴛ';
+  const out = message.includes(marker) ? message.replace(marker, section + marker) : message + '\n\n' + section;
+  return { message: out, saveUrl };
+}
+
+function buildClash(proto, username, secret, host, links) {
+  const wp = PROTO_WS_PATH[proto] || '';
+  const grpc = PROTO_GRPC[proto] || '';
+  const lines = [`# Clash config - ${username} (${proto}) - ${host}`, 'proxies:'];
+  if (proto === 'vmess') {
+    lines.push(`  - {name: ${username}-TLS, type: vmess, server: ${host}, port: 443, uuid: ${secret}, alterId: 0, cipher: auto, udp: true, tls: true, skip-cert-verify: true, servername: ${host}, network: ws, ws-opts: {path: ${wp}, headers: {Host: ${host}}}}`);
+    lines.push(`  - {name: ${username}-HTTP, type: vmess, server: ${host}, port: 80, uuid: ${secret}, alterId: 0, cipher: auto, udp: true, tls: false, network: ws, ws-opts: {path: ${wp}, headers: {Host: ${host}}}}`);
+    lines.push(`  - {name: ${username}-GRPC, type: vmess, server: ${host}, port: 443, uuid: ${secret}, alterId: 0, cipher: auto, udp: true, tls: true, skip-cert-verify: true, servername: ${host}, network: grpc, grpc-opts: {grpc-service-name: ${grpc}}}`);
+  } else if (proto === 'vless') {
+    lines.push(`  - {name: ${username}-TLS, type: vless, server: ${host}, port: 443, uuid: ${secret}, udp: true, tls: true, skip-cert-verify: true, servername: ${host}, network: ws, ws-opts: {path: ${wp}, headers: {Host: ${host}}}}`);
+    lines.push(`  - {name: ${username}-HTTP, type: vless, server: ${host}, port: 80, uuid: ${secret}, udp: true, tls: false, network: ws, ws-opts: {path: ${wp}, headers: {Host: ${host}}}}`);
+    lines.push(`  - {name: ${username}-GRPC, type: vless, server: ${host}, port: 443, uuid: ${secret}, udp: true, tls: true, skip-cert-verify: true, servername: ${host}, network: grpc, grpc-opts: {grpc-service-name: ${grpc}}}`);
+  } else if (proto === 'trojan') {
+    lines.push(`  - {name: ${username}-TLS, type: trojan, server: ${host}, port: 443, password: ${secret}, udp: true, tls: true, skip-cert-verify: true, sni: ${host}, network: ws, ws-opts: {path: ${wp}, headers: {Host: ${host}}}}`);
+    lines.push(`  - {name: ${username}-HTTP, type: trojan, server: ${host}, port: 80, password: ${secret}, udp: true, tls: false, network: ws, ws-opts: {path: ${wp}, headers: {Host: ${host}}}}`);
+    lines.push(`  - {name: ${username}-GRPC, type: trojan, server: ${host}, port: 443, password: ${secret}, udp: true, tls: true, skip-cert-verify: true, sni: ${host}, network: grpc, grpc-opts: {grpc-service-name: ${grpc}}}`);
+  } else if (proto === 'shadowsocks') {
+    lines.push(`  - {name: ${username}-TLS, type: ss, server: ${host}, port: 443, cipher: aes-256-gcm, password: ${secret}, udp: true, plugin: v2ray-plugin, plugin-opts: {mode: websocket, tls: true, host: ${host}, path: ${wp}}}`);
+    lines.push(`  - {name: ${username}-HTTP, type: ss, server: ${host}, port: 80, cipher: aes-256-gcm, password: ${secret}, udp: true, plugin: v2ray-plugin, plugin-opts: {mode: websocket, host: ${host}, path: ${wp}}}`);
+  } else return null;
+  if (links) lines.push('', '# Link (salin dari pesan akun):', `# TLS: ${links.tls || ''}`, `# HTTP: ${links.http || ''}`, `# GRPC: ${links.grpc || ''}`);
+  return lines.join('\n') + '\n';
+}
+
+function buildV2ray(proto, username, secret, host, wsPath) {
+  const wp = wsPath || PROTO_WS_PATH[proto] || '';
+  let outbound;
+  if (proto === 'vmess') {
+    outbound = { protocol: 'vmess', settings: { vnext: [{ address: host, port: 443, users: [{ id: secret, alterId: 0, security: 'auto' }] }] }, streamSettings: { network: 'ws', security: 'tls', tlsSettings: { serverName: host }, wsSettings: { path: wp, headers: { Host: host } } } };
+  } else if (proto === 'vless') {
+    outbound = { protocol: 'vless', settings: { vnext: [{ address: host, port: 443, users: [{ id: secret, encryption: 'none', flow: '' }] }] }, streamSettings: { network: 'ws', security: 'tls', tlsSettings: { serverName: host }, wsSettings: { path: wp, headers: { Host: host } } } };
+  } else if (proto === 'trojan') {
+    outbound = { protocol: 'trojan', settings: { servers: [{ address: host, port: 443, password: secret, email: username }] }, streamSettings: { network: 'ws', security: 'tls', tlsSettings: { serverName: host }, wsSettings: { path: wp, headers: { Host: host } } } };
+  } else if (proto === 'shadowsocks') {
+    outbound = { protocol: 'shadowsocks', settings: { servers: [{ address: host, port: 443, method: 'aes-256-gcm', password: secret, email: username, ota: false }] }, streamSettings: { network: 'ws', security: 'tls', tlsSettings: { serverName: host }, wsSettings: { path: wp, headers: { Host: host } } } };
+  } else return null;
+  return JSON.stringify({ log: { loglevel: 'warning' }, inbounds: [{ port: 1080, protocol: 'socks', settings: { auth: 'noauth', udp: true } }], outbounds: [outbound, { protocol: 'freedom', tag: 'direct' }] }, null, 2);
+}
 
 // ---------- SSH ----------
 async function createSSH(username, password, days, ipLimit = 1, srv = null) {
@@ -174,10 +291,10 @@ function cfSSHInfo(username, password, days, srv = null) {
 }
 
 // ---------- VMess ----------
-function vmessLink(uuid, remark, host, port, path, tls) {
+function vmessLink(uuid, remark, host, port, path, tls, net = 'ws') {
   const obj = {
     v: '2', ps: remark, add: host, port: String(port),
-    id: uuid, aid: '0', scy: 'auto', net: 'ws',
+    id: uuid, aid: '0', scy: 'auto', net,
     type: 'none', host: host, path, tls: tls ? 'tls' : '',
     sni: tls ? host : '',
   };
@@ -198,12 +315,14 @@ async function createVMess(username, days, viaCF = false, srv = null) {
     return { success: false, message: `❌ Gagal membuat akun: ${esc(data?.message || 'API error')}` };
   const useUuid = viaCF ? cf.vmessUuid || uuid : uuid;
   const path = viaCF ? cf.paths.vmess : '/vmess';
-  const link = vmessLink(useUuid, viaCF ? `${username}-cf` : username, host, 443, path, true);
+  const remark = viaCF ? `${username}-cf` : username;
+  const links = viaCF ? { tls: vmessLink(useUuid, remark, host, 443, path, true) } : buildXrayLinks('vmess', remark, useUuid, host, path);
+  const link = links.tls;
   const exp = expiryDate(days);
   return {
     success: true,
-    message: fancyBox({ proto: 'vmess', viaCF, username, secretIcon: '🆔', secretLabel: 'UUID', secret: useUuid, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, wsPath: path }),
-    expiry: exp, link, uuid: useUuid,
+    message: fancyBox({ proto: 'vmess', viaCF, username, secretIcon: '🆔', secretLabel: 'UUID', secret: useUuid, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, links, wsPath: path, grpcService: viaCF ? '' : 'vmess-grpc' }),
+    expiry: exp, link, links, uuid: useUuid,
   };
 }
 
@@ -218,12 +337,14 @@ async function createVLess(username, days, viaCF = false, srv = null) {
     return { success: false, message: `❌ Gagal membuat akun: ${esc(dataVL?.message || 'API error')}` };
   const useUuid = viaCF ? cf.vlessUuid || uuid : uuid;
   const path = encodeURIComponent(viaCF ? cf.paths.vless : '/vless');
-  const link = `vless://${useUuid}@${host}:443?encryption=none&security=tls&sni=${host}&type=ws&path=${path}#${username}${viaCF ? '-cf' : ''}`;
+  const remark = viaCF ? `${username}-cf` : username;
+  const links = viaCF ? { tls: `vless://${useUuid}@${host}:443?encryption=none&security=tls&sni=${host}&type=ws&path=${path}#${remark}` } : buildXrayLinks('vless', remark, useUuid, host, '/vless');
+  const link = links.tls;
   const exp = expiryDate(days);
   return {
     success: true,
-    message: fancyBox({ proto: 'vless', viaCF, username, secretIcon: '🆔', secretLabel: 'UUID', secret: useUuid, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, wsPath: viaCF ? cf.paths.vless : '/vless' }),
-    expiry: exp, link, uuid: useUuid,
+    message: fancyBox({ proto: 'vless', viaCF, username, secretIcon: '🆔', secretLabel: 'UUID', secret: useUuid, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, links, wsPath: viaCF ? cf.paths.vless : '/vless', grpcService: viaCF ? '' : 'vless-grpc' }),
+    expiry: exp, link, links, uuid: useUuid,
   };
 }
 
@@ -238,19 +359,22 @@ async function createTrojan(username, days, viaCF = false, srv = null) {
     return { success: false, message: `❌ Gagal membuat akun: ${esc(dataTR?.message || 'API error')}` };
   const usePass = viaCF ? cf.trojanPassword || password : password;
   const path = encodeURIComponent(viaCF ? cf.paths.trojan : '/trojan');
-  const link = `trojan://${usePass}@${host}:443?security=tls&sni=${host}&type=ws&path=${path}#${username}${viaCF ? '-cf' : ''}`;
+  const remark = viaCF ? `${username}-cf` : username;
+  const links = viaCF ? { tls: `trojan://${usePass}@${host}:443?security=tls&sni=${host}&type=ws&path=${path}#${remark}` } : buildXrayLinks('trojan', remark, usePass, host, '/trojan');
+  const link = links.tls;
   const exp = expiryDate(days);
   return {
     success: true,
-    message: fancyBox({ proto: 'trojan', viaCF, username, secretIcon: '🔑', secretLabel: 'Password', secret: usePass, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, wsPath: viaCF ? cf.paths.trojan : '/trojan' }),
-    expiry: exp, link, password: usePass,
+    message: fancyBox({ proto: 'trojan', viaCF, username, secretIcon: '🔑', secretLabel: 'Password', secret: usePass, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, links, wsPath: viaCF ? cf.paths.trojan : '/trojan', grpcService: viaCF ? '' : 'trojan-grpc' }),
+    expiry: exp, link, links, password: usePass,
   };
 }
 
 // ---------- Shadowsocks ----------
-function ssLink(method, password, host, port, remark) {
+function ssLink(method, password, host, port, remark, plugin = '') {
   const userinfo = Buffer.from(`${method}:${password}`).toString('base64');
-  return `ss://${userinfo}@${host}:${port}#${encodeURIComponent(remark)}`;
+  const q = plugin ? `?plugin=${encodeURIComponent(plugin)}` : '';
+  return `ss://${userinfo}@${host}:${port}${q}#${encodeURIComponent(remark)}`;
 }
 
 async function createShadowsocks(username, days, viaCF = false, srv = null) {
@@ -263,20 +387,14 @@ async function createShadowsocks(username, days, viaCF = false, srv = null) {
     return { success: false, message: `❌ Gagal membuat akun: ${esc(dataSS?.message || 'API error')}` };
   if (viaCF && !cf.domain) return { success: false, message: '\u274c Domain CloudFront belum diset.' };
   const port = 443;
-  const link = ssLink(method, password, host, port, `${username}${viaCF ? '-cf' : ''}`);
+  const remark = `${username}${viaCF ? '-cf' : ''}`;
+  const links = viaCF ? { tls: ssLink(method, password, host, port, remark) } : buildXrayLinks('shadowsocks', remark, password, host, '/ss-ws');
+  const link = links.tls;
   const exp = expiryDate(days);
   return {
     success: true,
-    message:
-      `\u2705 <b>Shadowsocks${viaCF ? ' via CloudFront' : ''}</b>\n<blockquote>` +
-      `👤 Username: <code>${username}</code>\n` +
-      `🔑 Password: <code>${password}</code>\n` +
-      `🔐 Method: <code>${method}</code>\n` +
-      `🌍 Host: <code>${host}</code>\n` +
-      `🔌 Port: <code>${port}</code>\n` +
-      `📅 Expired: <code>${exp}</code></blockquote>\n\n` +
-      `<code>${link}</code>`,
-    expiry: exp, link, password,
+    message: fancyBox({ proto: 'shadowsocks', viaCF, username, secretIcon: '🔑', secretLabel: 'Password', secret: password, exp, origin: dispDomain(srv), host, cfDomain: cf.domain || '', link, links, wsPath: '/ss-ws', grpcService: viaCF ? '' : 'ss-grpc', method }),
+    expiry: exp, link, links, password, method,
   };
 }
 
@@ -317,6 +435,7 @@ async function deleteAccount(proto, username, srv = null) {
     return { success: false, message: 'API delete ditolak, dicoba lagi di sweep berikutnya.' };
   }
   await run('DELETE FROM vpn_accounts WHERE username = ? AND proto = ? AND server_id = ?', [username, proto, srv?.id || 0]);
+  deleteSaveFile(proto, username);
   return { success: true, message: `🗑️ Akun <b>${username}</b> (${proto}) dihapus.` };
 }
 
@@ -553,7 +672,7 @@ async function countAccounts(srv = null) {
 
 module.exports = {
   countAccounts,
-  createSSH, cfSSHInfo, createVMess, createVLess, createTrojan, createShadowsocks, createZivpn, fancyBox,
+  createSSH, cfSSHInfo, createVMess, createVLess, createTrojan, createShadowsocks, createZivpn, fancyBox, buildXrayLinks, buildClash, buildV2ray, attachSave, deleteSaveFile,
   renewAccount, deleteAccount, saveAccount, myAccounts, validUser, expiryDate,
   canClaimTrial, recordTrialClaim, sweepExpiredTrials, trialExpiresAtISO, getServer, listBuyServers, dispDomain,
   VPN_PRODUCTS, DEFAULT_VPN_PRICE, seedVpnPrices, getVpnPrice, setVpnPrice, listVpnPrices,

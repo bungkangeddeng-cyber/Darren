@@ -35,6 +35,7 @@ const settings = require('./modules/settings');
 // Grup wajib join & grup notifikasi — dikonfigurasi via panel admin (tabel bot_settings).
 // Fallback ke nilai lama agar tidak blokir user bila belum dikonfigurasi.
 const hcCache = new Map(); // userId_proto_username -> {proto, username, uuid, password}
+const exportCache = new Map(); // kunci sama -> {proto, username, uuid, password, domain, links, saveUrl, exp, method}
 const prodCache = new Map(); // userId -> {pageItems: [...], page}
 const digi = require('./src/digiflazz');
 const { esc } = require('./src/format');
@@ -560,6 +561,8 @@ async function finishTrialVpn(ctx, sess, username, password = '') {
   // Pesan trial menampilkan JAM berakhir (WIB), bukan tanggal expiry.
   const endWib = new Date(Date.now() + 3600 * 1000 + 7 * 3600 * 1000);
   const hhmm = String(endWib.getUTCHours()).padStart(2, '0') + ':' + String(endWib.getUTCMinutes()).padStart(2, '0');
+  const _att = vpn.attachSave(proto, username, r.message, srv);
+  r.message = _att.message; r.saveUrl = _att.saveUrl;
   const msg = r.message.replace(/Expired\s*:?\s*<code>[^<]*<\/code>/, `📅 Berlaku s/d : <code>${hhmm} WIB</code> 🎁 Trial 1 jam`)
     + `\n\n🎁 <b>TRIAL GRATIS 1 JAM</b> — berlaku s/d <b>${hhmm} WIB</b>, akun dihapus otomatis setelah habis.`;
   let extra = { parse_mode: 'HTML' };
@@ -573,8 +576,55 @@ async function finishTrialVpn(ctx, sess, username, password = '') {
     if (hcCache.size > 100) hcCache.delete(hcCache.keys().next().value);
     extra.reply_markup = { inline_keyboard: [[{ text: '📱 Download .hc', callback_data: 'hc_dl_' + cacheKey }]] };
   }
+  const expRows = exportRowsFor(ctx, proto, username, r, viaCF, srv);
+  if (expRows.length) {
+    const kb = (extra.reply_markup && extra.reply_markup.inline_keyboard) || [];
+    extra.reply_markup = { inline_keyboard: [...expRows, ...kb] };
+  }
   await ctx.reply(msg, extra);
 }
+
+
+function exportRowsFor(ctx, proto, username, r, viaCF, srv) {
+  if (!r || !r.success) return [];
+  if (!['vmess', 'vless', 'trojan', 'shadowsocks', 'ssh'].includes(proto)) return [];
+  const key = ctx.from.id + '_' + proto + '_' + username;
+  const domain = viaCF ? config.cloudfront.domain : (srv?.domain || config.vpn.domain);
+  exportCache.set(key, { proto, username, uuid: r.uuid || '', password: r.password || '', domain, links: r.links || (r.link ? { tls: r.link } : {}), saveUrl: r.saveUrl || '', exp: r.expiry || '', method: r.method || '' });
+  if (exportCache.size > 100) exportCache.delete(exportCache.keys().next().value);
+  if (proto === 'ssh') return [[{ text: '📱 HTTP Custom', callback_data: 'exp_httpcustom_' + key }, { text: '🌐 NetMod', callback_data: 'exp_netmod_' + key }]];
+  return [
+    [{ text: '📦 Clash', callback_data: 'exp_clash_' + key }, { text: '⚡ V2Ray', callback_data: 'exp_v2ray_' + key }],
+    [{ text: '📱 HTTP Custom', callback_data: 'exp_httpcustom_' + key }, { text: '🌐 NetMod', callback_data: 'exp_netmod_' + key }],
+  ];
+}
+
+bot.action(/^exp_(clash|v2ray|httpcustom|netmod)_(.+)$/, async (ctx) => {
+  await safeCb(ctx);
+  const kind = ctx.match[1];
+  const info = exportCache.get(ctx.match[2]);
+  if (!info) { await ctx.reply('❌ Data akun tidak ditemukan. Buat akun baru dulu.'); return; }
+  if (kind === 'clash') {
+    const yaml = vpn.buildClash(info.proto, info.username, info.uuid, info.password, info.domain, info.links);
+    if (!yaml) { await ctx.reply('❌ Clash tidak tersedia untuk protokol ini.'); return; }
+    await ctx.replyWithDocument({ source: Buffer.from(yaml, 'utf8'), filename: `clash-${info.username}.yaml` }, { caption: `📦 Clash config untuk <code>${info.username}</code>`, parse_mode: 'HTML' });
+    return;
+  }
+  if (kind === 'v2ray') {
+    const json = vpn.buildV2ray(info.proto, info.username, info.uuid, info.password, info.domain);
+    if (!json) { await ctx.reply('❌ V2Ray tidak tersedia untuk protokol ini.'); return; }
+    await ctx.replyWithDocument({ source: Buffer.from(json, 'utf8'), filename: `v2ray-${info.username}.json` }, { caption: `⚡ V2Ray config untuk <code>${info.username}</code>`, parse_mode: 'HTML' });
+    return;
+  }
+  const appName = kind === 'httpcustom' ? 'HTTP Custom' : 'NetMod';
+  if (info.proto === 'ssh') {
+    await ctx.reply(`📱 <b>${appName}</b> — SSH <code>${info.username}</code>\n<blockquote>🌐 Host: <code>${info.domain}</code>\n👤 Username: <code>${info.username}</code>\n🔑 Password: <code>${info.password}</code>\n🔌 TLS: 443 / HTTP: 80 / SSH: 22</blockquote>\n\n📄 Payload:\n<code>GET wss://[host]/ HTTP/1.1[crlf]Host: ${info.domain}[crlf]Upgrade: websocket[crlf][crlf]</code>`, { parse_mode: 'HTML' });
+    return;
+  }
+  const link = (info.links && info.links.tls) || '';
+  if (!link) { await ctx.reply('❌ Link tidak tersedia.'); return; }
+  await ctx.reply(`📱 <b>${appName}</b> — impor link ini:\n<code>${link}</code>`, { parse_mode: 'HTML' });
+});
 
 // ---------- Terima input teks (session) ----------
 bot.on('text', async (ctx) => {
@@ -1393,6 +1443,15 @@ async function finishCreateVpn(ctx, sess, username, password = '', days = 30) {
         { text: '📱 Download .hc', callback_data: 'hc_dl_' + cacheKey }
       ]]
     };
+  }
+  if (r.success) {
+    const _att = vpn.attachSave(proto, username, r.message, srv);
+    r.message = _att.message; r.saveUrl = _att.saveUrl;
+  }
+  const expRows = exportRowsFor(ctx, proto, username, r, viaCF, srv);
+  if (expRows.length) {
+    const kb = (extra.reply_markup && extra.reply_markup.inline_keyboard) || [];
+    extra.reply_markup = { inline_keyboard: [...expRows, ...kb] };
   }
   await ctx.reply(r.message, extra);
 }
