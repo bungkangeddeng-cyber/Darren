@@ -883,6 +883,25 @@ else
   echo "PERINGATAN: Cdy/speedtest tidak ada di repo — speedtest dilewati." >&2
 fi
 
+# ---------- 10c. SSH-WS stack: ws + tun.conf + ws.service (port 10015) ----------
+# nginx :1010 meneruskan jalur SSH-WS (catch-all -> /newbiestoressh) ke
+# 127.0.0.1:10015. Tanpa stack ini, SSH lewat port 80/443 SELALU 502
+# (upstream connection refused) walau haproxy/nginx/Xray sehat — inilah yang
+# hilang pada install segar 2026-11-04 (installer lama tidak memasang ws).
+# Target bridge = sshd :22 (bukan dropbear :143 — K10 sudah menghapus
+# dropbear; tun.conf repo sudah diarahkan ke 22).
+if [ -f "$SRC_DIR/v4-main/Fls/ws" ] && [ -f "$SRC_DIR/v4-main/Cfg/tun.conf" ] && [ -f "$SRC_DIR/v4-main/Fls/ws.service" ]; then
+  install -m 755 "$SRC_DIR/v4-main/Fls/ws" /usr/bin/ws
+  cp -a "$SRC_DIR/v4-main/Cfg/tun.conf" /usr/bin/tun.conf
+  cp -a "$SRC_DIR/v4-main/Fls/ws.service" /etc/systemd/system/ws.service
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable ws 2>/dev/null || true
+  systemctl restart ws 2>/dev/null || systemctl start ws 2>/dev/null || echo "PERINGATAN: ws gagal start — SSH lewat 80/443 akan 502." >&2
+  if ss -ltn 2>/dev/null | grep -q ':10015 '; then echo "OK: ws mendengarkan :10015 (SSH lewat 80/443 hidup)."; else echo "PERINGATAN: :10015 tidak mendengarkan — cek systemctl status ws." >&2; fi
+else
+  echo "PERINGATAN: Fls/ws, Cfg/tun.conf, atau Fls/ws.service tidak ada di repo — SSH lewat 80/443 tidak terpasang." >&2
+fi
+
 # FASE 2: pasang unit + script limit dari repo LOKAL (Fls) — tanpa unduh
 # eksternal. Pemetaan sesuai Fls/limit.sh bawaan repo (hanya pemetaan
 # berkasnya yang dipakai; logika unduh eksternal script itu TIDAK dipakai):
