@@ -54,6 +54,12 @@ async function addSaldo(telegramId, amount) {
   return { saldo: await getSaldo(telegramId), bonus };
 }
 
+// Kredit saldo TANPA bonus (untuk refund): refund tidak boleh memicu bonus topup.
+async function creditSaldo(telegramId, amount) {
+  await run('UPDATE users SET saldo = saldo + ? WHERE telegram_id = ?', [amount, telegramId]);
+  return getSaldo(telegramId);
+}
+
 // ---------- Role (admin / reseller / member) ----------
 // Role valid: 'admin' (akses panel admin), 'reseller' (harga reseller),
 // 'member' (default, harga normal). Admin utama (owner) tetap config.adminId.
@@ -211,11 +217,31 @@ async function buyProduct(telegramId, buyerSkuCode, customerNo, priceSell) {
       };
     }
     // gagal -> refund
-    await addSaldo(telegramId, priceSell);
+    await creditSaldo(telegramId, priceSell);
     await run('UPDATE transactions SET status = ? WHERE ref_id = ?', ['failed', ref]);
     return { success: false, message: `❌ <b>Transaksi gagal.</b>\n${esc(res?.message || 'unknown')}\n💰 Saldo dikembalikan.` };
   } catch (e) {
-    await addSaldo(telegramId, priceSell);
+    // Respons hilang (timeout) belum tentu gagal: cek status dulu ke Digiflazz.
+    // Bila ternyata sukses, JANGAN refund (hindari produk + refund dobel).
+    try {
+      const chk = await digi.checkTransaction(ref);
+      const st = (chk?.status || '').toLowerCase();
+      if (st === 'sukses' || st === 'success') {
+        await run('UPDATE transactions SET status = ? WHERE ref_id = ?', ['success', ref]);
+        return {
+          success: true,
+          message:
+            `✅ <b>Transaksi Sukses!</b>\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `<blockquote>📦 Produk: <code>${esc(buyerSkuCode)}</code>\n` +
+            `📱 Tujuan: <code>${esc(customerNo)}</code>\n` +
+            `💰 Harga: <b>${digi.rp(priceSell)}</b>\n` +
+            `🧾 Ref: <code>${ref}</code>\n` +
+            `🔑 SN: <code>${esc(chk.sn || '-')}</code></blockquote>`,
+        };
+      }
+    } catch (_) { /* cek gagal -> lanjut refund */ }
+    await creditSaldo(telegramId, priceSell);
     await run('UPDATE transactions SET status = ? WHERE ref_id = ?', ['failed', ref]);
     return { success: false, message: `❌ <b>Error:</b> ${esc(e.message)}\n💰 Saldo dikembalikan.` };
   }
@@ -242,7 +268,7 @@ async function checkOrder(ref) {
     const map = { sukses: 'success', success: 'success', gagal: 'failed', failed: 'failed' };
     const final = map[status] || 'pending';
     await run('UPDATE transactions SET status = ? WHERE ref_id = ?', [final, cleanRef]);
-    if (final === 'failed') await addSaldo(tx.telegram_id, tx.amount); // refund
+    if (final === 'failed') await creditSaldo(tx.telegram_id, tx.amount); // refund tanpa bonus
     return {
       success: true,
       status: final,
@@ -639,4 +665,4 @@ async function getHistory(telegramId, limit = 10) {
   };
 }
 
-module.exports = { getSaldo, addSaldo, deductSaldo, createDeposit, buyProduct, checkOrder, productList, productKeyboard, providerKeyboard, refId, getHistory, getRole, setRole, VALID_ROLES, getBonusConfig, setBonusConfig, applyTopupBonus, CATEGORY_GROUPS, CATEGORY_ORDER, CATEGORY_LABELS, searchItems, hasProviders, getProviderNames, getProviderDefs, filterByProvider, getActiveMargin, sellPriceOfAsync };
+module.exports = { getSaldo, addSaldo, creditSaldo, deductSaldo, createDeposit, buyProduct, checkOrder, productList, productKeyboard, providerKeyboard, refId, getHistory, getRole, setRole, VALID_ROLES, getBonusConfig, setBonusConfig, applyTopupBonus, CATEGORY_GROUPS, CATEGORY_ORDER, CATEGORY_LABELS, searchItems, hasProviders, getProviderNames, getProviderDefs, filterByProvider, getActiveMargin, sellPriceOfAsync };

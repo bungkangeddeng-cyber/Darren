@@ -9,7 +9,7 @@ const BASE_URL = 'https://api.digiflazz.com/v1';
 // ============================================================
 // CONFIG DIGIFLAZZ
 // Dibaca dari:
-// .vars.json
+// .env
 //   ├── DIGIFLAZZ_USERNAME
 //   └── DIGIFLAZZ_API_KEY
 // ============================================================
@@ -86,7 +86,7 @@ async function post(endpoint, body) {
 async function priceList(cmd) {
   if (!enabled()) {
     throw new Error(
-      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .vars.json'
+      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .env'
     );
   }
 
@@ -118,10 +118,7 @@ async function priceList(cmd) {
 async function sync() {
   const old = db.products();
 
-  const output = {
-    ...old,
-    lastSync: Date.now()
-  };
+  const output = { ...old };
 
   const [prepaid, pasca] = await Promise.allSettled([
     priceList('prepaid'),
@@ -148,6 +145,7 @@ async function sync() {
     );
   }
 
+  if (prepaid.status === 'fulfilled' || pasca.status === 'fulfilled') output.lastSync = Date.now();
   db.saveProducts(output);
 
   if (
@@ -168,7 +166,7 @@ async function sync() {
 async function balance() {
   if (!enabled()) {
     throw new Error(
-      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .vars.json'
+      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .env'
     );
   }
 
@@ -203,7 +201,7 @@ async function transaction({
 }) {
   if (!enabled()) {
     throw new Error(
-      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .vars.json'
+      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .env'
     );
   }
 
@@ -241,7 +239,7 @@ async function transaction({
 async function checkTransaction(refId) {
   if (!enabled()) {
     throw new Error(
-      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .vars.json'
+      'DIGIFLAZZ_USERNAME / DIGIFLAZZ_API_KEY belum diisi di .env'
     );
   }
 

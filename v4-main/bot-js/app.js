@@ -1009,11 +1009,23 @@ bot.on('text', async (ctx) => {
 
   // --- Session beli PPOB: tujuan (tombol daftar produk ATAU input kode manual) ---
   if (sess?.step === 'ppob_tujuan') {
-    const tujuan = ctx.message.text.trim();
+    let tujuan = ctx.message.text.trim();
     if (!tujuan || tujuan.length < 5) {
       return ctx.reply('❌ Nomor tujuan tidak valid. Coba lagi:');
     }
     const d = sess.data || {};
+    if (d.category || d.brand) {
+      const spec = digi.destinationSpec(d.category, d.brand);
+      const tokens = tujuan.split(/\s+/).filter(Boolean);
+      if (spec.tokens === 1) {
+        tujuan = tokens.join('');
+        if (!tujuan || tujuan.length < 5) return ctx.reply('❌ Nomor tujuan tidak valid. Coba lagi:');
+      } else if (tokens.length !== spec.tokens) {
+        return ctx.reply(`❌ Format tujuan salah. Harus ${spec.tokens} bagian (${esc(spec.label)}), contoh: <code>${esc(spec.placeholder)}</code>. Coba lagi:`);
+      } else {
+        tujuan = tokens.join(' ');
+      }
+    }
     sessions.delete(chatId);
     // Animasi loading: edit SATU pesan yang sama selama transaksi berjalan.
     const loadFrames = ['⏳ Memproses pembelian...', '⌛ Memproses pembelian...', '🔄 Memproses pembelian...'];
@@ -2029,14 +2041,14 @@ bot.action(/^prod_buy_([a-zA-Z0-9-: .]*?)_(\d+)_(\d+)$/, async (ctx) => {
   const page = parseInt(ctx.match[2], 10);
   const idx = parseInt(ctx.match[3], 10);
   const cached = prodCache.get(ctx.from.id);
-  if (!cached || !cached.pageItems || cached.page !== page || (cached.group || '') !== (ctx.match[1] || '') || !cached.pageItems[idx]) {
+  if (!cached || !cached.pageItems || (cached._ts && Date.now() - cached._ts > 30 * 60 * 1000) || cached.page !== page || (cached.group || '') !== (ctx.match[1] || '') || !cached.pageItems[idx]) {
     await ctx.reply('❌ Produk tidak ditemukan / halaman kadaluarsa. Buka daftar produk lagi.');
     return;
   }
   const p = cached.pageItems[idx];
   sessions.set(ctx.chat.id, {
     step: 'ppob_tujuan',
-    data: { sku: p.buyer_sku_code, price: p.price_sell, productName: p.product_name },
+    data: { sku: p.buyer_sku_code, price: p.price_sell, productName: p.product_name, category: p.category, brand: p.brand },
   });
   const spec = digi.destinationSpec(p.category, p.brand);
   await ctx.reply(
