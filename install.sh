@@ -1039,7 +1039,8 @@ for cand in "$PWD/v4-main/Cfg" "/root/darren-install/v4-main/Cfg" "$(dirname "$0
 done
 if [ -z "$SRC_CFG_F2B" ]; then echo "ERROR: template fail2ban (Cfg/fail2ban-jail.local) tidak ditemukan." >&2; exit 1; fi
 cp "$SRC_CFG_F2B/fail2ban-jail.local" /etc/fail2ban/jail.local
-systemctl enable --now fail2ban || echo "PERINGATAN: start fail2ban gagal (gate memberi peringatan)." >&2
+systemctl enable fail2ban
+systemctl restart fail2ban || echo "PERINGATAN: start fail2ban gagal (gate memberi peringatan)." >&2
 echo "Langkah 10e selesai."
 
 
