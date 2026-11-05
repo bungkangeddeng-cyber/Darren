@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261105-07
+# DARREN_INSTALLER_VERSION=fix-total-20261105-08
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
 # Yang diinstal: bot-js (Telegram) + VPN API lokal (port 5890, localhost saja),
 # Xray (wajib jalan; default YA), menu utama SSH (menu.zip -> /usr/bin), dan vnstat untuk traffic menu.
+# Mode --remote: instalasi stack VPN TANPA bot Telegram (server remote yang
+# didaftarkan ke bot utama). Cocok untuk "Install Server Baru" lewat bot:
+# bot utama SSH ke VPS baru dan menjalankan installer ini dengan --remote.
 # Uninstaller pasangannya: uninstall.sh (repo yang sama).
 #
 # Cara pakai di VPS baru (sebagai root):
@@ -12,6 +15,8 @@
 #   chmod +x install.sh
 #   ./install.sh
 #   ./install.sh --total   # install total: backup + hapus instalasi lama, lalu install baru
+#   ./install.sh --remote  # server remote: stack VPN saja, tanpa bot Telegram
+#                          # (non-interaktif; domain lewat env REMOTE_DOMAIN)
 # Repo Darren saat ini PUBLIK, jadi unduhan di atas tidak butuh token.
 # Bila repo sudah di-private-kan (RENCANA, bukan fakta saat ini), token baca
 # read-only khusus repo Darren dibuat dari HP owner (masa berlaku pendek)
@@ -29,7 +34,7 @@ set -euo pipefail
 # script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # B15: penanda versi (grep DARREN_INSTALLER_VERSION).
-DARREN_INSTALLER_VERSION="fix-total-20261105-07"
+DARREN_INSTALLER_VERSION="fix-total-20261105-08"
 # B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
 # rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
 # ubah konstanta ini + README, lalu uji live ulang.
@@ -49,14 +54,24 @@ fi
 
 # ---------- Argumen ----------
 TOTAL=0
+REMOTE=0
 for arg in "$@"; do
   case "$arg" in
     --total) TOTAL=1 ;;
+    --remote) REMOTE=1 ;;
     --help|-h)
-      echo "Pakai: ./install.sh [--total]"
+      echo "Pakai: ./install.sh [--total] [--remote]"
       echo "  --total   Install total: backup lalu hapus semua instalasi SC lama,"
       echo "            termasuk Node/PM2/vnstat, baru install baru (token bot +"
       echo "            admin diminta ulang; Node/PM2 dipasang lagi dari nol)."
+      echo "  --remote  Server remote: instal stack VPN saja TANPA bot Telegram."
+      echo "            Non-interaktif (tidak ada prompt): domain lewat env"
+      echo "            REMOTE_DOMAIN, IP publik bot utama lewat env"
+      echo "            REMOTE_MAIN_IP (WAJIB — firewall port API 5890 hanya"
+      echo "            untuk IP itu), token GitHub lewat env GH_TOKEN (bila"
+      echo "            repo sudah private). Bila instalasi lama ditemukan,"
+      echo "            otomatis install total (backup dulu). Cocok untuk"
+      echo "            instalasi lewat bot utama (SSH) — lihat README."
       echo "  Tanpa --total, bila instalasi lama ditemukan installer akan bertanya"
       echo "  dulu sebelum menghapus total."
       echo "  Token GitHub: set GH_TOKEN=... atau isi prompt (token baca repo,"
@@ -90,9 +105,15 @@ fi
 # Token TIDAK disimpan di file mana pun dan TIDAK dibiarkan di config git:
 # clone memakai header sekali pakai (http.extraHeader), bukan URL bertoken.
 if [ -z "${GH_TOKEN:-}" ]; then
-  read -r -s -p "Token GitHub baca repo Darren (dari HP owner; kosongkan bila repo masih publik): " GH_TOKEN || true
-  echo ""
-  TOKEN_SOURCE="prompt"
+  if [ "$REMOTE" = 1 ]; then
+    # Mode remote non-interaktif: token hanya lewat env GH_TOKEN (bila repo
+    # sudah private); kosongkan = repo masih publik. Tanpa prompt.
+    TOKEN_SOURCE="environment"
+  else
+    read -r -s -p "Token GitHub baca repo Darren (dari HP owner; kosongkan bila repo masih publik): " GH_TOKEN || true
+    echo ""
+    TOKEN_SOURCE="prompt"
+  fi
 else
   TOKEN_SOURCE="environment"
 fi
@@ -320,6 +341,30 @@ fi
 # Prompt-prompt ini DULU ada di langkah 5 (setelah penghapusan total),
 # sehingga batal/EOF di prompt meninggalkan VPS telanjang. Sekarang semua
 # ditanyakan SEBELUM penghapusan destruktif apa pun (langkah 3b).
+# Mode --remote: non-interaktif — semua prompt dilewati, nilai default dipakai.
+# Domain dari env REMOTE_DOMAIN (diisi bot utama); sisanya kosong (fitur bot
+# nonaktif di server remote). BOT_TOKEN/ADMIN_ID tidak ada (tanpa bot).
+if [ "$REMOTE" = 1 ]; then
+  echo "Mode remote: instalasi stack VPN tanpa bot Telegram (non-interaktif)."
+  VPN_DOMAIN="${REMOTE_DOMAIN:-}"
+  if [ -n "$VPN_DOMAIN" ] && ! [[ "$VPN_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    echo "PERINGATAN: domain '$VPN_DOMAIN' mengandung karakter tidak valid — diabaikan (domain kosong = localhost saja)."
+    VPN_DOMAIN=""
+  fi
+  BOT_TOKEN=""; ADMIN_ID=""; H2H_URL=""; H2H_KEY=""
+  GH_IP_TOKEN=""; GH_IP_OWNER=""; GH_IP_REPO=""; GH_IP_FILE=""
+  SIDOMPUL_API_KEY=""; HC_API_KEY=""
+  CF_DOMAIN=""; CF_VMESS_UUID=""; CF_VLESS_UUID=""; CF_TROJAN_PASSWORD=""
+  DIGI_USER=""; DIGI_KEY=""
+  install_xray=""
+  # Mode remote: IP bot utama WAJIB (untuk firewall port API 5890).
+  # Tanpa ini, API tidak dibuka (fail-closed) — instalasi berhenti.
+  if [ -z "${REMOTE_MAIN_IP:-}" ] || ! [[ "$REMOTE_MAIN_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: mode --remote wajib env REMOTE_MAIN_IP (IP publik bot utama, contoh: 146.190.107.177)." >&2
+    echo "Tanpa IP ini, firewall port API 5890 tidak bisa dibatasi ke bot utama — instalasi DIBATALKAN." >&2
+    exit 1
+  fi
+else
 echo ""
 echo "Isi konfigurasi berikut. Kosongkan yang opsional bila belum ada."
 read -r -p "Domain VPS kamu (contoh: vpn.contoh.com, kosong = localhost saja): " VPN_DOMAIN || true
@@ -401,6 +446,7 @@ echo "jalan setelah install, verifikasi akhir akan GAGAL dan install"
 echo "dinyatakan GAGAL (VPN lewat domain tidak jalan) — pilih N hanya bila"
 echo "kamu sengaja ingin install gagal di verifikasi / pasang Xray manual."
 read -r -p "Instal Xray? [Y/n, kosong = YA; N = verifikasi akhir GAGAL] " install_xray || true
+fi
 
 # B4: randomisasi fail-closed — gagal mengacak = BERHENTI dengan peringatan
 # keras, TIDAK PERNAH memakai nilai contoh publik sebagai fallback.
@@ -409,7 +455,15 @@ VPN_API_AUTH="$(openssl rand -hex 24)" || { echo "ERROR: gagal mengacak VPN_API_
 VPN_API_BASE="http://127.0.0.1:5890"
 
 # ---------- 3b. Install total ----------
-if [ "$TOTAL" = 1 ]; then
+if [ "$REMOTE" = 1 ]; then
+  # Mode remote non-interaktif: instalasi lama (bila ada) otomatis dibackup
+  # lalu dihapus total (siapkan_install_total) — server remote harus fresh.
+  # Konfirmasi sudah dilakukan admin di bot utama sebelum SSH ke VPS ini.
+  if [ "$TOTAL" = 1 ] || [ -d "$BOT_DIR" ] || [ -f /usr/bin/menu ]; then
+    echo "Mode remote: instalasi lama (bila ada) dibackup lalu dihapus total."
+    siapkan_install_total
+  fi
+elif [ "$TOTAL" = 1 ]; then
   # FASE 1: --total wajib konfirmasi ketik YA (gaya uninstall mandiri)
   # SEBELUM siapkan_install_total berjalan; selain YA = batal total.
   echo "PERINGATAN: --total akan membackup lalu MENGHAPUS TOTAL stack Darren lama (bot, API, Xray, menu, Node/PM2/vnstat)."
@@ -427,11 +481,19 @@ elif [ -d "$BOT_DIR" ] || [ -f /usr/bin/menu ]; then
     echo "Lanjut install biasa (instalasi lama dipertahankan)."
   fi
 fi
-if [ ! -f "$SRC_DIR/v4-main/bot-js/app.js" ]; then
-  echo "Source bot-js tidak ditemukan di $SRC_DIR/v4-main" >&2
-  exit 1
+if [ "$REMOTE" = 1 ]; then
+  # Mode remote: bot tidak diinstal — cukup pastikan vpn-api.py ada.
+  if [ ! -f "$SRC_DIR/v4-main/Api/vpn-api.py" ]; then
+    echo "Source vpn-api.py tidak ditemukan di $SRC_DIR/v4-main" >&2
+    exit 1
+  fi
+else
+  if [ ! -f "$SRC_DIR/v4-main/bot-js/app.js" ]; then
+    echo "Source bot-js tidak ditemukan di $SRC_DIR/v4-main" >&2
+    exit 1
+  fi
+  node --check "$SRC_DIR/v4-main/bot-js/app.js"
 fi
-node --check "$SRC_DIR/v4-main/bot-js/app.js"
 python3 -m py_compile "$SRC_DIR/v4-main/Api/vpn-api.py"
 
 # ---------- 4. Backup instalasi lama (bila ada) — B1/B24 ----------
@@ -464,6 +526,13 @@ fi
 # VPN_API_BASE) sudah terisi di sana dan dipakai langkah 6-9 di bawah.
 
 # ---------- 6. Salin bot + API ----------
+# Mode remote: bot TIDAK disalin dan .env bot TIDAK dibuat — hanya vpn-api.py
+# yang disalin (langkah 7 memasang servicenya). Domain efektif = VPN_DOMAIN.
+if [ "$REMOTE" = 1 ]; then
+  cp "$SRC_DIR/v4-main/Api/vpn-api.py" "$API_FILE"
+  EFFECTIVE_DOMAIN="$VPN_DOMAIN"
+  echo "Mode remote: vpn-api.py disalin (tanpa bot-js, tanpa .env bot)."
+else
 # FASE 2: cadangkan .env lama SEBELUM rm -rf (salinan baru dari repo
 # tidak berisi .env, jadi pemeriksaan .env sesudah rm selalu gagal dan
 # cabang "jangan timpa" lama praktis mati).
@@ -552,13 +621,50 @@ EOF
   chmod 600 "$BOT_DIR/.env"
   echo ".env dibuat (600)."
 fi
+fi
 
-# ---------- 7. Service VPN API (localhost saja) ----------
+# ---------- 7. Service VPN API (localhost saja; remote: 0.0.0.0 + UFW) ----------
 mkdir -p /etc/vpn-api
+if [ "$REMOTE" = 1 ]; then
+  # Server remote: API mengikat 0.0.0.0 supaya bot utama bisa memanggilnya
+  # lewat IP publik. Firewall UFW dipasang SEBELUM service jalan: hanya IP
+  # bot utama yang boleh ke port 5890. REMOTE_MAIN_IP sudah divalidasi
+  # di blok prompt (fail-closed bila kosong/tidak valid).
+  cat > /etc/vpn-api/auth.env <<EOF
+VPN_API_AUTH=$VPN_API_AUTH
+VPN_API_PORT=5890
+VPN_API_HOST=0.0.0.0
+EOF
+  echo "Mode remote: menyiapkan firewall UFW (API 5890 hanya untuk $REMOTE_MAIN_IP)..."
+  apt-get install -y ufw >/dev/null 2>&1 || { echo "ERROR: apt ufw gagal — API tidak dibuka tanpa firewall, instalasi DIBATALKAN." >&2; exit 1; }
+  ufw allow 22/tcp >/dev/null 2>&1 || true
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  ufw allow 81/tcp >/dev/null 2>&1 || true
+  ufw allow from "$REMOTE_MAIN_IP" to any port 5890 >/dev/null 2>&1 || { echo "ERROR: ufw allow 5890 dari $REMOTE_MAIN_IP gagal — instalasi DIBATALKAN." >&2; exit 1; }
+  # Verifikasi aturan SEBELUM enable (ufw show added = aturan tersimpan):
+  # SSH (22/tcp) wajib ada supaya enable tidak mengunci sesi ini, dan
+  # aturan 5890 untuk IP bot utama wajib ada (satu baris yang sama).
+  _added="$(ufw show added 2>/dev/null || echo "")"
+  if ! echo "$_added" | grep -q "22/tcp"; then
+    echo "ERROR: aturan SSH (22/tcp) tidak terpasang — UFW TIDAK di-enable (SSH tetap terbuka), instalasi DIBATALKAN." >&2; exit 1
+  fi
+  if ! echo "$_added" | grep "5890" | grep -Fq "$REMOTE_MAIN_IP"; then
+    echo "ERROR: aturan 5890 untuk $REMOTE_MAIN_IP tidak terpasang — instalasi DIBATALKAN." >&2; exit 1
+  fi
+  if ! ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw --force enable >/dev/null 2>&1 || { echo "ERROR: ufw enable gagal — instalasi DIBATALKAN." >&2; exit 1; }
+  fi
+  if ! ufw status 2>/dev/null | grep "5890" | grep -Fq "$REMOTE_MAIN_IP"; then
+    echo "ERROR: aturan UFW port 5890 untuk $REMOTE_MAIN_IP tidak ditemukan sesudah enable — instalasi DIBATALKAN." >&2; exit 1
+  fi
+  echo "OK: UFW aktif, port 5890 hanya untuk $REMOTE_MAIN_IP."
+else
 cat > /etc/vpn-api/auth.env <<EOF
 VPN_API_AUTH=$VPN_API_AUTH
 VPN_API_PORT=5890
 EOF
+fi
 chmod 600 /etc/vpn-api/auth.env
 cat > /etc/systemd/system/vpn-api.service <<EOF
 [Unit]
@@ -584,6 +690,12 @@ else
 fi
 
 # ---------- 8. Bot ----------
+if [ "$REMOTE" = 1 ]; then
+  # Mode remote: tanpa bot — PM2 tidak dipakai, gate bot dilewati (nilai 0).
+  PM2_SAVE_FAIL=0
+  PM2_STARTUP_FAIL=0
+  echo "Mode remote: langkah bot dilewati (tanpa bot Telegram)."
+else
 cd "$BOT_DIR"
 npm install
 # Hentikan bot lama bila ada, lalu jalankan yang baru
@@ -597,6 +709,7 @@ pm2 save || PM2_SAVE_FAIL=1
 if ! pm2 startup systemd -u root --hp /root 2>/dev/null; then
   PM2_STARTUP_FAIL=1
   echo "PERINGATAN: pm2 startup gagal — verifikasi akhir akan menggagalkan install." >&2
+fi
 fi
 
 # ---------- 9. Xray (wajib jalan; default YA) ----------
@@ -973,7 +1086,7 @@ fi
 # private. Disimpan terkunci (600) di /etc/xray/izin-token, hanya root yang baca.
 # Bisa lewat env IZIN_TOKEN atau prompt tersembunyi. Kosongkan bila repo masih
 # publik (cek-izin tetap jalan tanpa token); wajib setelah repo private.
-if [ -z "${IZIN_TOKEN:-}" ]; then
+if [ -z "${IZIN_TOKEN:-}" ] && [ "$REMOTE" != 1 ]; then
   read -r -s -p "Token baca izin menu (dari HP owner; kosongkan bila repo masih publik): " IZIN_TOKEN || true
   echo ""
 fi
@@ -1098,10 +1211,12 @@ if curl -fsSL http://127.0.0.1:5890/health >/dev/null 2>&1; then
 else
   echo "GAGAL: Health API tidak merespon." >&2; VERIFY_FAIL=1
 fi
+if [ "$REMOTE" != 1 ]; then
 if pm2 describe ripzz-bot-js 2>/dev/null | grep -q "online"; then
   echo "OK: bot PM2 ripzz-bot-js online"
 else
   echo "GAGAL: bot PM2 ripzz-bot-js tidak online — cek: pm2 list" >&2; VERIFY_FAIL=1
+fi
 fi
 if systemctl is-active --quiet xray; then
   echo "OK: xray aktif"
@@ -1127,11 +1242,14 @@ else
   echo "GAGAL: /usr/bin/cek-izin tidak ditemukan/tidak executable." >&2; VERIFY_FAIL=1
 fi
 # B11 (gating): pm2 save/startup yang gagal MENGGAGALKAN verifikasi.
+# Mode remote: tanpa bot — gate PM2 dilewati.
+if [ "$REMOTE" != 1 ]; then
 if [ "${PM2_SAVE_FAIL:-0}" = "1" ]; then
   echo "GAGAL: pm2 save gagal — bot tidak akan pulih otomatis setelah restart." >&2; VERIFY_FAIL=1
 fi
 if [ "${PM2_STARTUP_FAIL:-0}" = "1" ] || ! systemctl is-enabled pm2-root >/dev/null 2>&1; then
   echo "GAGAL: pm2 startup belum aktif — bot TIDAK akan auto-start saat boot. Jalankan manual: pm2 startup systemd -u root --hp /root" >&2; VERIFY_FAIL=1
+fi
 fi
 # B3: gate Xray menjalankan 'xray run -test' pada config BARU — proses lama
 # yang masih jalan TIDAK boleh menutupi config baru yang rusak.
@@ -1157,10 +1275,13 @@ if systemctl is-active --quiet nginx; then
 else
   echo "GAGAL: nginx tidak aktif." >&2; VERIFY_FAIL=1
 fi
+# Mode remote: tanpa bot — tidak ada receiver webhook deposit di server ini.
+if [ "$REMOTE" != 1 ]; then
 if grep -q 'location /webhook/deposit' /etc/nginx/conf.d/xray.conf 2>/dev/null; then
   echo "OK: nginx :81 meneruskan /webhook/deposit ke receiver bot (127.0.0.1:8899)"
 else
   echo "PERINGATAN: /webhook/deposit tidak ada di nginx :81 — deposit webhook tidak akan sampai ke bot (poller 30 detik tetap jalan)." >&2
+fi
 fi
 if systemctl is-active --quiet openvpn-server@tcp && systemctl is-active --quiet openvpn-server@udp; then
   echo "OK: OpenVPN aktif (TCP 1194 + UDP 2200)"
@@ -1239,8 +1360,16 @@ else
   echo "VERDICT VPN domain: BELUM JALAN — TLS pending (${TLS_REASON:-tidak diketahui}); selesaikan change-domain manual (README: Pasca-install wajib)."
 fi
 echo "=== Selesai ==="
-echo "Bot: /root/bot-js (pm2: ripzz-bot-js)"
-echo "API: /root/vpn-api.py, service vpn-api, auth di /etc/vpn-api/auth.env (600)"
+if [ "$REMOTE" = 1 ]; then
+  echo "Server remote: stack VPN terpasang TANPA bot Telegram."
+  echo "API: /root/vpn-api.py, service vpn-api, auth di /etc/vpn-api/auth.env (600)"
+  echo "API base untuk bot utama: http://$(hostname -I 2>/dev/null | awk '{print $1}'):5890"
+  echo "Daftarkan server ini ke bot utama (tombol Tambah Server) dengan API base di atas"
+  echo "dan kunci auth dari /etc/vpn-api/auth.env (dibaca bot utama lewat SSH)."
+else
+  echo "Bot: /root/bot-js (pm2: ripzz-bot-js)"
+  echo "API: /root/vpn-api.py, service vpn-api, auth di /etc/vpn-api/auth.env (600)"
+fi
 echo "PENTING:"
 echo " - Port API 5890 hanya bind localhost. Jangan dibuka ke publik."
 echo " - Bila ini migrasi dari script lama, generate PKI OpenVPN baru."

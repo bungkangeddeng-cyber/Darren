@@ -21,6 +21,7 @@ const GROUP_NOTIF = ''; // ID grup notifikasi diatur via panel admin; kosong = n
 const { init: initDb } = require('./src/db');
 const vpn = require('./modules/vpn');
 const srvTools = require('./modules/servers');
+const installServer = require('./src/install-server');
 const liveServer = require('./src/live-server');
 const apiSettings = require('./src/api-settings');
 const ppob = require('./modules/ppob');
@@ -163,6 +164,7 @@ bot.action('cancel_flow', async (ctx) => {
 // ---------- Panel Admin ----------
 const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('➕ Tambah Server', 'adm_addserver', 'success'), sBtn('❌ Hapus Server', 'adm_delserver', 'danger')],
+  [sBtn('🖥️ Install Server Baru', 'adm_installsrv', 'success')],
   [sBtn('💲 Edit Harga', 'adm_editharga', 'primary'), sBtn('📝 Edit Nama', 'adm_editnama', 'primary')],
   [sBtn('💲 Harga VPN/Role', 'adm_vpnprices', 'primary'), sBtn('👥 Kelola Role', 'adm_roles', 'primary')],
   [sBtn('🌐 Edit Domain', 'adm_editdomain', 'primary'), sBtn('📋 List Server', 'adm_listserver', 'success')],
@@ -1211,6 +1213,62 @@ bot.on('text', async (ctx) => {
       `✅ <b>Server ditambahkan!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🌐 Domain: <code>${esc(d.domain)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>${d.api_auth ? 'terisi' : 'kosong (tanpa auth)'}</b>\n💲 Harga: <b>Rp${harga.toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>`,
       { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
     );
+  }
+
+  // ============================================================
+  // --- Session: Install Server Baru (SSH + installer --remote) ---
+  // ============================================================
+  // Install server baru: IP VPS
+  if (sess?.step === 'adm_installsrv_ip') {
+    const ip = ctx.message.text.trim();
+    if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
+    if (!installServer.validIp(ip)) return ctx.reply('❌ IP tidak valid. Ketik IPv4 VPS baru (contoh: 146.190.107.177):');
+    sess.data.ip = ip;
+    sess.step = 'adm_installsrv_domain';
+    return ctx.reply(`🖥️ <b>Install Server Baru</b>\n\n📡 IP: <code>${esc(ip)}</code>\n\nKetik <b>domain server</b> (contoh: sgdo2.satsetvpn.web.id) — ketik <b>-</b> bila belum ada domain:`, { parse_mode: 'HTML' });
+  }
+
+  // Install server baru: domain (atau -)
+  if (sess?.step === 'adm_installsrv_domain') {
+    const raw = ctx.message.text.trim();
+    if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
+    const domain = (raw === '-') ? '' : raw;
+    if (domain && !installServer.validDomain(domain)) return ctx.reply('❌ Domain tidak valid (huruf, angka, titik, strip saja). Coba lagi atau ketik -:');
+    sess.data.domain = domain;
+    sess.step = 'adm_installsrv_nama';
+    return ctx.reply(`🖥️ <b>Install Server Baru</b>\n\n📡 IP: <code>${esc(sess.data.ip)}</code>\n🌐 Domain: <code>${esc(domain || '-')}</code>\n\nKetik <b>nama server</b> (contoh: SGDO-2):`, { parse_mode: 'HTML' });
+  }
+
+  // Install server baru: nama
+  if (sess?.step === 'adm_installsrv_nama') {
+    const nama = ctx.message.text.trim();
+    if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
+    if (!nama || nama.length < 2) return ctx.reply('❌ Nama terlalu pendek. Coba lagi:');
+    sess.data.nama = nama;
+    sess.step = 'adm_installsrv_harga';
+    return ctx.reply(`🖥️ <b>Install Server Baru</b>\n\n📡 IP: <code>${esc(sess.data.ip)}</code>\n🌐 Domain: <code>${esc(sess.data.domain || '-')}</code>\n📝 Nama: <b>${esc(nama)}</b>\n\nKetik <b>harga per hari</b> (angka saja, contoh: 500):`, { parse_mode: 'HTML' });
+  }
+
+  // Install server baru: harga -> konfirmasi (tombol Ya/Batal)
+  if (sess?.step === 'adm_installsrv_harga') {
+    const harga = parseInt(ctx.message.text.replace(/\D/g, ''), 10);
+    if (!await admin.hasAdminAccess(ctx)) { sessions.delete(chatId); return ctx.reply('❌ Khusus admin.'); }
+    if (!harga || harga < 0) return ctx.reply('❌ Harga tidak valid. Ketik angka saja (contoh: 500):');
+    sess.data.harga = harga;
+    const d = sess.data;
+    sessions.set(chatId, { step: 'adm_installsrv_confirm', data: d });
+    return ctx.reply(
+      `🖥️ <b>Install Server Baru — Konfirmasi</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n🌐 Domain: <code>${esc(d.domain || '- (localhost saja)')}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n💲 Harga: <b>Rp${harga.toLocaleString('id-ID')}/hari</b>\n\nBot akan SSH ke VPS ini sebagai root dan menjalankan installer Darren mode remote (stack VPN saja, tanpa bot Telegram). Bila ada instalasi Darren lama di VPS itu, akan dibackup lalu dihapus total. Pastikan kunci SSH installer bot sudah ditambahkan ke VPS ini lewat konsol provider.\n\nLanjutkan?`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[sBtn('✅ Ya, instal', 'adm_installsrv_yes', 'success'), sBtn('🔙 Batal', 'adm_back', 'danger')]] },
+      }
+    );
+  }
+
+  // Install server baru: menunggu konfirmasi tombol (bukan ketikan)
+  if (sess?.step === 'adm_installsrv_confirm') {
+    return ctx.reply('⏳ Menunggu konfirmasi — ketuk <b>✅ Ya, instal</b> atau <b>🔙 Batal</b> di pesan konfirmasi di atas.', { parse_mode: 'HTML' });
   }
 
   // Edit harga: ketik harga baru dari keyboard
@@ -2341,6 +2399,66 @@ bot.action('adm_addserver', async (ctx) => {
   await safeCb(ctx);
   sessions.set(ctx.chat.id, { step: 'adm_addserver_nama', data: {} });
   await ctx.reply('➕ <b>Tambah Server</b>\n\nKetik <b>nama server</b>:', { parse_mode: 'HTML', ...cancelKb() });
+});
+
+// Install server baru: IP -> domain -> nama -> harga -> konfirmasi -> SSH install
+// (installer Darren mode --remote: stack VPN saja, tanpa bot Telegram).
+bot.action('adm_installsrv', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  sessions.set(ctx.chat.id, { step: 'adm_installsrv_ip', data: {} });
+  await ctx.reply(
+    '🖥️ <b>Install Server Baru</b>\n\nBot akan menginstal stack VPN Darren (mode remote, tanpa bot Telegram) ke VPS baru lewat SSH, lalu mendaftarkan server itu otomatis.\n\n<b>Prasyarat:</b> kunci SSH installer bot sudah ditambahkan ke VPS baru lewat konsol provider (DigitalOcean). Bila belum, instalasi akan gagal di langkah SSH.\n\nKetik <b>IP VPS baru</b> (contoh: 146.190.107.177):',
+    { parse_mode: 'HTML', ...cancelKb() }
+  );
+});
+
+bot.action('adm_installsrv_yes', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const sess = sessions.get(ctx.chat.id);
+  const d = sess && sess.step === 'adm_installsrv_confirm' ? sess.data : null;
+  sessions.delete(ctx.chat.id);
+  if (!d || !d.ip) return ctx.reply('❌ Data instalasi tidak ditemukan (sesi kedaluwarsa). Ulangi dari 🖥️ Install Server Baru.');
+  const apiBase = `http://${d.ip}:5890`;
+  await ctx.reply(
+    `⏳ <b>Menginstal server ${esc(d.nama)} (${esc(d.ip)})...</b>\n\nProses ini bisa 5–15 menit (apt, Node, Xray, PKI OpenVPN). Bot tetap bisa dipakai untuk hal lain, tapi jangan restart bot selama instalasi berjalan. Hasil instalasi akan dikirim di sini.`,
+    { parse_mode: 'HTML' }
+  );
+  let inst;
+  try {
+    inst = await installServer.installRemoteServer({ ip: d.ip, domain: d.domain || '' });
+  } catch (e) {
+    inst = { ok: false, message: 'Install gagal (error internal bot: ' + (e.message || e) + ').', tail: '' };
+  }
+  if (!inst.ok) {
+    return ctx.reply(
+      `❌ <b>Instalasi GAGAL — server TIDAK didaftarkan.</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n\nAlasan: ${esc(inst.message || 'tidak diketahui')}\n\n${inst.tail ? `<b>Log akhir:</b>\n<pre>${esc(inst.tail.slice(-1500))}</pre>` : ''}\nPerbaiki VPS/kunci SSH-nya, lalu ulangi dari 🖥️ Install Server Baru.`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  // Instalasi sukses: baca kunci auth vpn-api, health check, lalu daftarkan.
+  const apiAuth = await installServer.readRemoteAuth(d.ip).catch(() => null);
+  if (!apiAuth) {
+    return ctx.reply(
+      `⚠️ <b>Server terinstal, tapi kunci API tidak bisa dibaca.</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🔌 API: <code>${esc(apiBase)}</code>\n\nStack VPN sudah terpasang (installer lolos), tetapi bot tidak bisa membaca <code>/etc/vpn-api/auth.env</code> di VPS itu. Daftarkan manual via ➕ Tambah Server dengan API base di atas dan kunci dari file tersebut (baca lewat SSH manual).`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  const health = await srvTools.checkServerHealth(apiBase).catch(() => ({ ok: false, message: 'Health check gagal (error internal).' }));
+  if (!health.ok) {
+    return ctx.reply(
+      `⚠️ <b>Server terinstal, tapi health check API gagal.</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🔌 API: <code>${esc(apiBase)}</code>\n\nAlasan: ${esc(health.message)}\n\nServer TIDAK didaftarkan otomatis. Periksa service vpn-api di VPS itu, lalu daftarkan manual via ➕ Tambah Server.`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  const { run } = require('./src/db');
+  const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, active) VALUES (?,?,?,?,?,1)',
+    [d.nama, d.domain || '', apiBase, apiAuth, d.harga]);
+  return ctx.reply(
+    `✅ <b>Server baru terinstal & terdaftar!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n📡 IP: <code>${esc(d.ip)}</code>\n🌐 Domain: <code>${esc(d.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>terisi</b>\n💲 Harga: <b>Rp${Number(d.harga).toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer ini sudah muncul di pilihan server saat beli/trial VPN.`,
+    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+  );
 });
 
 // Hapus server: tampilkan daftar dengan tombol hapus

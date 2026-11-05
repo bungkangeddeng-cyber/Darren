@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""VPN API for v4 bot-js (localhost only, port 5890).
+"""VPN API for v4 bot-js (port 5890).
+Default bind localhost only (VPN_API_HOST=127.0.0.1). Server remote
+(installer --remote) mengikat 0.0.0.0 supaya bot utama bisa memanggil
+API-nya lewat IP publik — dengan UFW yang hanya mengizinkan IP bot utama
+ke port 5890, dan semua endpoint (kecuali /health) tetap wajib auth key.
 Endpoints (GET, BotVPN2-style): /createshh /createvmess /createvless
 /createtrojan /createss /renew /delete /createzivpn /countaccounts /health
 Returns JSON {"status":"success"} or {"status":"error","message":...}.
@@ -19,6 +23,9 @@ RESTART_SCRIPT = os.environ.get("VPN_API_RESTART_SCRIPT", "")
 DATA_DIR = os.environ.get("VPN_API_DATA_DIR", "")  # staging: ganti /etc/<proto> dan /etc/ssh, default produksi tetap /etc
 AUTH = os.environ.get("VPN_API_AUTH", "")
 PORT = int(os.environ.get("VPN_API_PORT", "5890"))
+# Bind host: default localhost (aman). Server remote (installer --remote)
+# memakai 0.0.0.0 supaya bot utama bisa memanggil API lewat IP publik.
+HOST = os.environ.get("VPN_API_HOST", "127.0.0.1")
 
 def run(cmd, **kw):
     # FIXED: never shell=True. Callers must pass a list.
@@ -561,4 +568,4 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    ThreadingHTTPServer((HOST, PORT), H).serve_forever()
