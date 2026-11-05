@@ -224,6 +224,13 @@ hapus_stack_darren() {
   systemctl disable --now limitvmess limitvless limittrojan limitshadowsocks 2>/dev/null || true
   rm -f /etc/systemd/system/limitvmess.service /etc/systemd/system/limitvless.service /etc/systemd/system/limittrojan.service /etc/systemd/system/limitshadowsocks.service
   rm -f /etc/xray/limit.vmess /etc/xray/limit.vless /etc/xray/limit.trojan /etc/xray/limit.shadowsocks
+  # FASE 2b: stack SSH-WS (ws + ws-shield + ws-bridge + tls-router) ikut
+  # dihapus supaya uninstall benar-benar fresh — sebelumnya tertinggal
+  # (hanya di-overwrite saat install ulang). Semua file ini ada di repo
+  # GitHub, jadi tidak perlu di-backup; install.sh 10c memasangnya lagi.
+  systemctl disable --now ws ws-shield ws-bridge tls-router 2>/dev/null || true
+  rm -f /etc/systemd/system/ws.service /etc/systemd/system/ws-shield.service /etc/systemd/system/ws-bridge.service /etc/systemd/system/tls-router.service
+  rm -f /usr/bin/ws /usr/local/bin/ws-shield.py /usr/local/bin/ws-bridge.py /usr/local/bin/tls-router.py
   systemctl daemon-reload 2>/dev/null || true
 
   # 3. Menu (daftar file persis dari menu.zip bila ada; dibaca SEBELUM
@@ -305,6 +312,7 @@ main() {
   echo "  - bot ripzz-bot-js (pm2) + daemon PM2 + startup pm2-root + ~/.pm2"
   echo "  - PM2 global (npm uninstall -g pm2 + /usr/lib/node_modules/pm2)"
   echo "  - service vpn-api + xray + file unitnya + direktori drop-in xray"
+  echo "  - service limit + stack SSH-WS (ws, ws-shield, ws-bridge, tls-router)"
   echo "  - service haproxy + nginx (dihentikan; paket + konfig utama TERSISA)"
   echo "  - file /root/bot-js, /root/vpn-api.py, /etc/vpn-api, /usr/local/bin/xray,"
   echo "    /etc/xray, menu /usr/bin/menu + script menu, /usr/bin/ipsave,"
