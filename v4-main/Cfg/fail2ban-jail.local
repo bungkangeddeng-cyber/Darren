@@ -1,0 +1,10 @@
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+banaction = nftables
+[sshd]
+enabled = true
+port = 22
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s

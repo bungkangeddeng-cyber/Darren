@@ -1029,6 +1029,20 @@ systemctl restart openvpn-server@tcp openvpn-server@udp || echo "PERINGATAN: sta
 echo "Langkah 10d selesai."
 
 
+# ---------- 10e. fail2ban: jail sshd (5 gagal/10 menit -> ban 1 jam) ----------
+echo "=== Langkah 10e: fail2ban (jail sshd) ==="
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y fail2ban || { echo "ERROR: apt fail2ban gagal." >&2; exit 1; }
+SRC_CFG_F2B=""
+for cand in "$PWD/v4-main/Cfg" "/root/darren-install/v4-main/Cfg" "$(dirname "$0")/v4-main/Cfg"; do
+  if [ -f "$cand/fail2ban-jail.local" ]; then SRC_CFG_F2B="$cand"; break; fi
+done
+if [ -z "$SRC_CFG_F2B" ]; then echo "ERROR: template fail2ban (Cfg/fail2ban-jail.local) tidak ditemukan." >&2; exit 1; fi
+cp "$SRC_CFG_F2B/fail2ban-jail.local" /etc/fail2ban/jail.local
+systemctl enable --now fail2ban || echo "PERINGATAN: start fail2ban gagal (gate memberi peringatan)." >&2
+echo "Langkah 10e selesai."
+
+
 VERIFY_FAIL=0
 if systemctl is-active --quiet vpn-api; then
   echo "OK: vpn-api aktif"
@@ -1113,6 +1127,11 @@ if [ -f /etc/openvpn/server/openvpn-tcp.log ] && [ -f /etc/openvpn/server/openvp
   echo "OK: log status OpenVPN ada (cek-ssh bisa tampilkan user OpenVPN)"
 else
   echo "PERINGATAN: log status OpenVPN belum ada." >&2
+fi
+if systemctl is-active --quiet fail2ban; then
+  echo "OK: fail2ban aktif (jail sshd)"
+else
+  echo "PERINGATAN: fail2ban tidak aktif — SSH port 22 tanpa penjaga brute force." >&2
 fi
 if [ "${TLS_STATUS:-pending}" = "ready" ]; then
   if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
