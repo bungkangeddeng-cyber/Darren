@@ -959,6 +959,76 @@ fi
 # ---------- 11. Verifikasi (HARUS lolos semua; bila ada yang gagal, install GAGAL) ----------
 echo ""
 echo "=== Verifikasi ==="
+# ---------- 10d. OpenVPN: server TCP 1194 + UDP 2200, PKI baru ----------
+echo "=== Langkah 10d: OpenVPN (TCP 1194 + UDP 2200, PKI baru) ==="
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y openvpn easy-rsa iptables || { echo "ERROR: apt openvpn gagal." >&2; exit 1; }
+PLUGIN_OVPN=$(ls /usr/lib/x86_64-linux-gnu/openvpn/plugins/openvpn-plugin-auth-pam.so 2>/dev/null | head -1)
+if [ -z "$PLUGIN_OVPN" ]; then PLUGIN_OVPN=$(find /usr/lib -name openvpn-plugin-auth-pam.so 2>/dev/null | head -1); fi
+if [ -z "$PLUGIN_OVPN" ]; then echo "ERROR: plugin auth-pam OpenVPN tidak ditemukan." >&2; exit 1; fi
+SRC_CFG=""
+for cand in "$PWD/v4-main/Cfg" "/root/darren-install/v4-main/Cfg" "$(dirname "$0")/v4-main/Cfg"; do
+  if [ -f "$cand/openvpn-tcp.conf" ]; then SRC_CFG="$cand"; break; fi
+done
+if [ -z "$SRC_CFG" ]; then echo "ERROR: template OpenVPN (Cfg/openvpn-tcp.conf) tidak ditemukan." >&2; exit 1; fi
+mkdir -p /etc/openvpn/server
+if [ -f /etc/openvpn/server/ca.crt ] && [ -f /etc/openvpn/server/server.crt ] && [ -f /etc/openvpn/server/server.key ] && [ -f /etc/openvpn/server/dh.pem ] && [ -f /etc/openvpn/server/ta.key ]; then
+  echo "PKI OpenVPN sudah ada — dipertahankan (tidak dibangun ulang)."
+else
+  rm -rf /etc/openvpn/server/easy-rsa
+  cp -a /usr/share/easy-rsa/. /etc/openvpn/server/easy-rsa/
+  (cd /etc/openvpn/server/easy-rsa && export EASYRSA_BATCH=1 && ./easyrsa init-pki && ./easyrsa --req-cn="sever2-ca" build-ca nopass && ./easyrsa --req-cn="server" gen-req server nopass && ./easyrsa sign-req server server && ./easyrsa gen-dh) || { echo "ERROR: build PKI OpenVPN gagal." >&2; exit 1; }
+  openvpn --genkey secret /etc/openvpn/server/ta.key || { echo "ERROR: genkey ta.key gagal." >&2; exit 1; }
+  cp /etc/openvpn/server/easy-rsa/pki/ca.crt /etc/openvpn/server/easy-rsa/pki/issued/server.crt /etc/openvpn/server/easy-rsa/pki/private/server.key /etc/openvpn/server/easy-rsa/pki/dh.pem /etc/openvpn/server/ || { echo "ERROR: salin PKI gagal." >&2; exit 1; }
+  chmod 600 /etc/openvpn/server/server.key /etc/openvpn/server/ta.key
+  chmod 644 /etc/openvpn/server/ca.crt /etc/openvpn/server/server.crt /etc/openvpn/server/dh.pem
+fi
+cp "$SRC_CFG/openvpn-tcp.conf" /etc/openvpn/server/tcp.conf
+cp "$SRC_CFG/openvpn-udp.conf" /etc/openvpn/server/udp.conf
+cp "$SRC_CFG/openvpn-pam" /etc/pam.d/openvpn
+chmod 644 /etc/pam.d/openvpn
+sed -i "s|__PLUGIN__|$PLUGIN_OVPN|g" /etc/openvpn/server/tcp.conf /etc/openvpn/server/udp.conf
+grep -q "__PLUGIN__" /etc/openvpn/server/tcp.conf /etc/openvpn/server/udp.conf && { echo "ERROR: placeholder plugin OpenVPN tidak terganti." >&2; exit 1; }
+IFACE_OVPN=$(ip route show default | awk '{print $5}' | head -1)
+if [ -n "$IFACE_OVPN" ]; then
+  printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-openvpn.conf
+  sysctl -p /etc/sysctl.d/99-openvpn.conf > /dev/null 2>&1 || true
+  cat > /etc/openvpn/server/nat.sh <<NAT_EOF
+#!/bin/bash
+sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+for net in 10.8.0.0/24 10.9.0.0/24; do
+  iptables -t nat -C POSTROUTING -s \$net -o $IFACE_OVPN -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s \$net -o $IFACE_OVPN -j MASQUERADE
+done
+iptables -C FORWARD -i tun+ -o $IFACE_OVPN -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tun+ -o $IFACE_OVPN -j ACCEPT
+iptables -C FORWARD -i $IFACE_OVPN -o tun+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i $IFACE_OVPN -o tun+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+NAT_EOF
+  chmod +x /etc/openvpn/server/nat.sh
+  cat > /etc/systemd/system/openvpn-nat.service <<'UNIT_EOF'
+[Unit]
+Description=OpenVPN NAT for tun subnets
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/openvpn/server/nat.sh
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+  systemctl daemon-reload
+  systemctl enable --now openvpn-nat.service || echo "PERINGATAN: openvpn-nat gagal start (NAT dicek di gate)." >&2
+else
+  echo "PERINGATAN: rute default tidak ditemukan — NAT OpenVPN dilewati." >&2
+fi
+if ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow 1194/tcp > /dev/null 2>&1 || true
+  ufw allow 2200/udp > /dev/null 2>&1 || true
+  ufw allow 1012/tcp > /dev/null 2>&1 || true
+fi
+systemctl enable openvpn-server@tcp openvpn-server@udp || echo "PERINGATAN: enable openvpn-server gagal." >&2
+systemctl restart openvpn-server@tcp openvpn-server@udp || echo "PERINGATAN: start OpenVPN gagal (butuh device TUN; bot + Xray tetap jalan, gate memberi peringatan)." >&2
+echo "Langkah 10d selesai."
+
+
 VERIFY_FAIL=0
 if systemctl is-active --quiet vpn-api; then
   echo "OK: vpn-api aktif"
@@ -1033,6 +1103,16 @@ if grep -q 'location /webhook/deposit' /etc/nginx/conf.d/xray.conf 2>/dev/null; 
   echo "OK: nginx :81 meneruskan /webhook/deposit ke receiver bot (127.0.0.1:8899)"
 else
   echo "PERINGATAN: /webhook/deposit tidak ada di nginx :81 — deposit webhook tidak akan sampai ke bot (poller 30 detik tetap jalan)." >&2
+fi
+if systemctl is-active --quiet openvpn-server@tcp && systemctl is-active --quiet openvpn-server@udp; then
+  echo "OK: OpenVPN aktif (TCP 1194 + UDP 2200)"
+else
+  echo "PERINGATAN: OpenVPN tidak aktif — akun OpenVPN via menu tidak akan jalan (cek device TUN + log)." >&2
+fi
+if [ -f /etc/openvpn/server/openvpn-tcp.log ] && [ -f /etc/openvpn/server/openvpn-udp.log ]; then
+  echo "OK: log status OpenVPN ada (cek-ssh bisa tampilkan user OpenVPN)"
+else
+  echo "PERINGATAN: log status OpenVPN belum ada." >&2
 fi
 if [ "${TLS_STATUS:-pending}" = "ready" ]; then
   if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
