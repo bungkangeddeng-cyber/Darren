@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261104-04
+# DARREN_INSTALLER_VERSION=fix-total-20261105-05
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
@@ -888,16 +888,29 @@ fi
 # 127.0.0.1:10015. Tanpa stack ini, SSH lewat port 80/443 SELALU 502
 # (upstream connection refused) walau haproxy/nginx/Xray sehat — inilah yang
 # hilang pada install segar 2026-11-04 (installer lama tidak memasang ws).
-# Target bridge = sshd :22 (bukan dropbear :143 — K10 sudah menghapus
-# dropbear; tun.conf repo sudah diarahkan ke 22).
+# Target bridge = perisai payload ws-shield :10017 (bukan sshd :22 langsung):
+# HTTP Custom (bug host + payload enhanced + auto replace) menyisipkan byte
+# HTTP ke aliran SSH; ws-shield membuang semua byte klien sampai banner
+# "SSH-2.0-" ditemukan, baru meneruskan ke sshd :22. Tanpa shield, config
+# bug host selalu gagal "Illegal packet size" / "invalid format" di sshd.
 if [ -f "$SRC_DIR/v4-main/Fls/ws" ] && [ -f "$SRC_DIR/v4-main/Cfg/tun.conf" ] && [ -f "$SRC_DIR/v4-main/Fls/ws.service" ]; then
   install -m 755 "$SRC_DIR/v4-main/Fls/ws" /usr/bin/ws
   cp -a "$SRC_DIR/v4-main/Cfg/tun.conf" /usr/bin/tun.conf
   cp -a "$SRC_DIR/v4-main/Fls/ws.service" /etc/systemd/system/ws.service
+  if [ -f "$SRC_DIR/v4-main/Cfg/ws-shield.py" ] && [ -f "$SRC_DIR/v4-main/Cfg/ws-shield.service" ]; then
+    install -m 755 "$SRC_DIR/v4-main/Cfg/ws-shield.py" /usr/local/bin/ws-shield.py
+    cp -a "$SRC_DIR/v4-main/Cfg/ws-shield.service" /etc/systemd/system/ws-shield.service
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable ws-shield 2>/dev/null || true
+    systemctl restart ws-shield 2>/dev/null || systemctl start ws-shield 2>/dev/null || echo "PERINGATAN: ws-shield gagal start — SSH config bug host akan gagal invalid format." >&2
+  else
+    echo "PERINGATAN: Cfg/ws-shield.py atau Cfg/ws-shield.service tidak ada di repo — tun.conf mengarah ke :10017 yang kosong, SSH lewat 80/443 akan gagal." >&2
+  fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable ws 2>/dev/null || true
   systemctl restart ws 2>/dev/null || systemctl start ws 2>/dev/null || echo "PERINGATAN: ws gagal start — SSH lewat 80/443 akan 502." >&2
   if ss -ltn 2>/dev/null | grep -q ':10015 '; then echo "OK: ws mendengarkan :10015 (SSH lewat 80/443 hidup)."; else echo "PERINGATAN: :10015 tidak mendengarkan — cek systemctl status ws." >&2; fi
+  if ss -ltn 2>/dev/null | grep -q ':10017 '; then echo "OK: ws-shield mendengarkan :10017 (perisai payload hidup)."; else echo "PERINGATAN: :10017 tidak mendengarkan — cek systemctl status ws-shield." >&2; fi
 else
   echo "PERINGATAN: Fls/ws, Cfg/tun.conf, atau Fls/ws.service tidak ada di repo — SSH lewat 80/443 tidak terpasang." >&2
 fi
@@ -1133,6 +1146,11 @@ if systemctl is-active --quiet fail2ban; then
   echo "OK: fail2ban aktif (jail sshd)"
 else
   echo "PERINGATAN: fail2ban tidak aktif — SSH port 22 tanpa penjaga brute force." >&2
+fi
+if systemctl is-active --quiet ws-shield && ss -ltn 2>/dev/null | grep -q ':10017 '; then
+  echo "OK: ws-shield aktif (:10017, perisai payload SSH jalan)"
+else
+  echo "PERINGATAN: ws-shield tidak aktif / :10017 tidak listen — SSH config bug host akan gagal invalid format (cek systemctl status ws-shield)." >&2
 fi
 if [ "${TLS_STATUS:-pending}" = "ready" ]; then
   if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then

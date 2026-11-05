@@ -1,0 +1,14 @@
+[Unit]
+Description=Perisai payload SSH (strip byte sampah sampai banner SSH-2.0-)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-shield.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
