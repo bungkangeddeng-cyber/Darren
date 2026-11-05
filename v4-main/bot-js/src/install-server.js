@@ -138,4 +138,17 @@ async function readRemoteAuth(ip) {
   return m ? m[1] : null;
 }
 
-module.exports = { validIp, validDomain, validPublicIp, getMainBotIp, installRemoteServer, readRemoteAuth, INSTALL_KEY };
+// Baca kunci PUBLIK installer (INSTALL_KEY + '.pub') untuk ditampilkan
+// di bot agar admin bisa menyalinnya ke VPS baru lewat konsol provider.
+// Aman ditampilkan: ini kunci PUBLIK, bukan privat. Mengembalikan string
+// kunci atau null bila file tidak ada / tidak terbaca.
+function getInstallerPublicKey() {
+  try {
+    const pub = INSTALL_KEY + '.pub';
+    if (!fs.existsSync(pub)) return null;
+    const key = fs.readFileSync(pub, 'utf8').trim();
+    return key || null;
+  } catch (_) { return null; }
+}
+
+module.exports = { validIp, validDomain, validPublicIp, getMainBotIp, installRemoteServer, readRemoteAuth, getInstallerPublicKey, INSTALL_KEY };
