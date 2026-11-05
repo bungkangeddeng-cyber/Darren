@@ -874,8 +874,21 @@ MENU_ZIP="$SRC_DIR/v4-main/Cdy/menu.zip"
 if [ -f "$MENU_ZIP" ]; then
   MENU_TMP="$(mktemp -d)"
   unzip -o -q "$MENU_ZIP" -d "$MENU_TMP"
-  chmod +x "$MENU_TMP"/menu/*
-  cp -a "$MENU_TMP"/menu/. /usr/bin/
+  # BUGFIX 2026-11-06: menu.zip berstruktur ganda menu/menu/<file>
+  # (dibangun 2026-11-05). Salin dari direktori terdalam yang berisi
+  # file, bukan dari level atas — kalau tidak, /usr/bin/menu jadi
+  # direktori dan /usr/bin/cek-izin tidak terpasang (gate gagal).
+  # Tangani kedua struktur (ganda dan tunggal) supaya rebuild zip
+  # manapun tetap jalan.
+  if [ -d "$MENU_TMP/menu/menu" ]; then
+    MENU_SRC="$MENU_TMP/menu/menu"
+  elif [ -d "$MENU_TMP/menu" ]; then
+    MENU_SRC="$MENU_TMP/menu"
+  else
+    MENU_SRC="$MENU_TMP"
+  fi
+  chmod +x "$MENU_SRC"/*
+  cp -a "$MENU_SRC"/. /usr/bin/
   rm -rf "$MENU_TMP"
   mkdir -p /etc/xray
   MENU_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
