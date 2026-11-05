@@ -1,0 +1,13 @@
+[Unit]
+Description=WebSocket bridge (proper RFC6455 101) for SSH path
+After=network.target ws-shield.service
+Requires=ws-shield.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-bridge.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

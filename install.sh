@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DARREN_INSTALLER_VERSION=fix-total-20261105-05
+# DARREN_INSTALLER_VERSION=fix-total-20261105-06
 # Installer v4-main (versi perbaikan, LENGKAP) untuk VPS baru.
 # Penanda versi yang bisa di-grep: DARREN_INSTALLER_VERSION di atas.
 # Xray dipin ke SATU rilis resmi: lihat XRAY_TAG_PIN di bawah (bukan latest mengambang).
@@ -29,7 +29,7 @@ set -euo pipefail
 # script sendiri — TIDAK PERNAH berasumsi direktori kerja pemanggil.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # B15: penanda versi (grep DARREN_INSTALLER_VERSION).
-DARREN_INSTALLER_VERSION="fix-total-20261104-04"
+DARREN_INSTALLER_VERSION="fix-total-20261105-06"
 # B22: SATU rilis resmi Xray-core yang dipin (terverifikasi ada di daftar
 # rilis publik XTLS/Xray-core; bukan latest mengambang). Mengganti pin =
 # ubah konstanta ini + README, lalu uji live ulang.
@@ -883,11 +883,16 @@ else
   echo "PERINGATAN: Cdy/speedtest tidak ada di repo — speedtest dilewati." >&2
 fi
 
-# ---------- 10c. SSH-WS stack: ws + tun.conf + ws.service (port 10015) ----------
+# ---------- 10c. SSH-WS stack: ws + tun.conf + ws.service + ws-bridge ----------
 # nginx :1010 meneruskan jalur SSH-WS (catch-all -> /newbiestoressh) ke
-# 127.0.0.1:10015. Tanpa stack ini, SSH lewat port 80/443 SELALU 502
-# (upstream connection refused) walau haproxy/nginx/Xray sehat — inilah yang
-# hilang pada install segar 2026-11-04 (installer lama tidak memasang ws).
+# ws-bridge 127.0.0.1:10018 (bukan lagi ws :10015). ws-bridge membalas
+# upgrade WS dengan 101 LENGKAP (Upgrade + Sec-WebSocket-Accept yang benar,
+# RFC6455) lalu menjembatani byte mentah ke ws-shield :10017. Tanpa bridge,
+# biner ws membalas 101 KOSONG (tanpa header) dan klien WS ketat (HTTP
+# Custom mode SSL 443) menutup koneksi tepat sesudah 101. ws :10015 tetap
+# terpasang (OVPN :10012 masih memakainya); tanpa stack ini, SSH lewat
+# port 80/443 SELALU 502 (upstream connection refused) walau haproxy/nginx/
+# Xray sehat — inilah yang hilang pada install segar 2026-11-04.
 # Target bridge = perisai payload ws-shield :10017 (bukan sshd :22 langsung):
 # HTTP Custom (bug host + payload enhanced + auto replace) menyisipkan byte
 # HTTP ke aliran SSH; ws-shield membuang semua byte klien sampai banner
@@ -906,11 +911,21 @@ if [ -f "$SRC_DIR/v4-main/Fls/ws" ] && [ -f "$SRC_DIR/v4-main/Cfg/tun.conf" ] &&
   else
     echo "PERINGATAN: Cfg/ws-shield.py atau Cfg/ws-shield.service tidak ada di repo — tun.conf mengarah ke :10017 yang kosong, SSH lewat 80/443 akan gagal." >&2
   fi
+  if [ -f "$SRC_DIR/v4-main/Cfg/ws-bridge.py" ] && [ -f "$SRC_DIR/v4-main/Cfg/ws-bridge.service" ]; then
+    install -m 755 "$SRC_DIR/v4-main/Cfg/ws-bridge.py" /usr/local/bin/ws-bridge.py
+    cp -a "$SRC_DIR/v4-main/Cfg/ws-bridge.service" /etc/systemd/system/ws-bridge.service
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable ws-bridge 2>/dev/null || true
+    systemctl restart ws-bridge 2>/dev/null || systemctl start ws-bridge 2>/dev/null || echo "PERINGATAN: ws-bridge gagal start — handshake WS mode SSL 443 akan ditolak klien ketat (101 tanpa Sec-WebSocket-Accept)." >&2
+  else
+    echo "PERINGATAN: Cfg/ws-bridge.py atau Cfg/ws-bridge.service tidak ada di repo — nginx mengarah ke :10018 yang kosong, SSH lewat 80/443 akan 502." >&2
+  fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable ws 2>/dev/null || true
   systemctl restart ws 2>/dev/null || systemctl start ws 2>/dev/null || echo "PERINGATAN: ws gagal start — SSH lewat 80/443 akan 502." >&2
   if ss -ltn 2>/dev/null | grep -q ':10015 '; then echo "OK: ws mendengarkan :10015 (SSH lewat 80/443 hidup)."; else echo "PERINGATAN: :10015 tidak mendengarkan — cek systemctl status ws." >&2; fi
   if ss -ltn 2>/dev/null | grep -q ':10017 '; then echo "OK: ws-shield mendengarkan :10017 (perisai payload hidup)."; else echo "PERINGATAN: :10017 tidak mendengarkan — cek systemctl status ws-shield." >&2; fi
+  if ss -ltn 2>/dev/null | grep -q ':10018 '; then echo "OK: ws-bridge mendengarkan :10018 (handshake WS RFC6455 hidup)."; else echo "PERINGATAN: :10018 tidak mendengarkan — cek systemctl status ws-bridge." >&2; fi
 else
   echo "PERINGATAN: Fls/ws, Cfg/tun.conf, atau Fls/ws.service tidak ada di repo — SSH lewat 80/443 tidak terpasang." >&2
 fi
@@ -1151,6 +1166,11 @@ if systemctl is-active --quiet ws-shield && ss -ltn 2>/dev/null | grep -q ':1001
   echo "OK: ws-shield aktif (:10017, perisai payload SSH jalan)"
 else
   echo "PERINGATAN: ws-shield tidak aktif / :10017 tidak listen — SSH config bug host akan gagal invalid format (cek systemctl status ws-shield)." >&2
+fi
+if systemctl is-active --quiet ws-bridge && ss -ltn 2>/dev/null | grep -q ':10018 '; then
+  echo "OK: ws-bridge aktif (:10018, handshake WS RFC6455 jalan)"
+else
+  echo "PERINGATAN: ws-bridge tidak aktif / :10018 tidak listen — klien WS ketat (HTTP Custom mode SSL) akan menutup koneksi sesudah 101 (cek systemctl status ws-bridge)." >&2
 fi
 if [ "${TLS_STATUS:-pending}" = "ready" ]; then
   if haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
