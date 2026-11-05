@@ -59,8 +59,8 @@ try {
   for (const [k, v] of JSON.parse(fs.readFileSync(LAST_MENUS_FILE, 'utf8'))) lastMenus.set(Number(k), v);
 } catch (_) {}
 // Helper aman untuk answerCbQuery (thrown sync oleh Telegraf bila bukan callback_query)
-const safeCb = async (ctx) => {
-  try { await ctx.answerCbQuery(); } catch (e) { /* ignore */ }
+const safeCb = async (ctx, text) => {
+  try { await ctx.answerCbQuery(text || undefined); } catch (e) { /* ignore */ }
 };
 // Helper tombol berwarna (Bot API 9.4+: primary=biru, success=hijau, danger=merah)
 const sBtn = (text, data, style) => {
