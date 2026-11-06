@@ -803,6 +803,18 @@ if [[ ! "$install_xray" =~ ^[Nn] ]]; then
         rm -f /etc/systemd/system/xray.service.d/*.conf
       fi
       mkdir -p /etc/xray
+      # BUGFIX 2026-11-06: config Xray menulis log ke /var/log/xray/
+      # (access.log + error.log). Direktori ini TIDAK pernah dibuat
+      # installer — di server2 ia selamat dari uninstall, tapi di VPS
+      # benar-benar baru (SG2, 139.59.239.169) Xray gagal start
+      # ('open /var/log/xray/access.log: no such file or directory')
+      # sehingga run -test gagal dan gate verifikasi gagal. Buat di sini
+      # sebelum run -test / service jalan. Service berjalan sebagai root,
+      # jadi kepemilikan tidak menghalangi tulis; samakan ke xray:xray
+      # bila user itu ada (sesuai keadaan terbukti di server2).
+      mkdir -p /var/log/xray
+      if id xray >/dev/null 2>&1; then chown xray:xray /var/log/xray 2>/dev/null || true; fi
+      chmod 700 /var/log/xray 2>/dev/null || true
       if [ ! -f /etc/xray/config.json ]; then
         cp "$SRC_DIR/v4-main/Cfg/config.json" /etc/xray/config.json
         # FASE 1: kredensial contoh di template ada di repo publik — ganti
