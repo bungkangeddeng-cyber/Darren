@@ -337,6 +337,72 @@ else
   git_clone_darren "$SRC_DIR"
   echo "HEAD source baru: $(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo tidak-terbaca)"
 fi
+# ---------- 4b. Izin install (allowlist GitHub) ----------
+# File allowlist di repo: izin-install.txt (format IP|Nama|YYYY-MM-DD).
+# Owner mengelola penyewa cukup dengan mengedit file itu di GitHub
+# (nama, IP, tanggal berakhir sewa). Installer memeriksa IP publik VPS
+# ini + masa sewa SEBELUM instalasi apa pun — tidak terdaftar atau
+# sudah kedaluwarsa = instalasi DIBATALKAN (fail-closed).
+# File dibaca dari clone segar ($SRC_DIR) — clone di atas selalu
+# memastikan HEAD sama dengan remote, jadi daftarnya yang terbaru.
+# Repo private: clone sudah memakai GH_TOKEN, file ikut terbawa.
+check_install_license() {
+  local allow="$SRC_DIR/izin-install.txt"
+  if [ ! -f "$allow" ]; then
+    echo "ERROR: File izin install ($allow) tidak ditemukan di repo." >&2
+    echo "Instalasi DIBATALKAN — owner harus memastikan izin-install.txt ada di repo Darren (main)." >&2
+    exit 1
+  fi
+  # IP publik VPS ini (ifconfig.me dulu — itulah IP yang dilihat internet
+  # dan yang owner tulis di allowlist; fallback ke IP interface).
+  local my_ip=""
+  my_ip="$(curl -fsSL --max-time 10 https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || true)"
+  if ! [[ "$my_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    my_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  if ! [[ "$my_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: IP publik VPS ini tidak bisa ditentukan (ifconfig.me + hostname -I gagal)." >&2
+    echo "Instalasi DIBATALKAN — periksa jaringan VPS, lalu jalankan ulang." >&2
+    exit 1
+  fi
+  local today
+  today="$(date +%F)"
+  local found_name="" found_exp=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Abaikan komentar (#...) dan baris kosong.
+    case "$line" in ''|'#'*) continue ;; esac
+    # Format: IP|Nama|YYYY-MM-DD — spasi di sekitar | diabaikan.
+    local f_ip f_name f_exp
+    f_ip="$(echo "$line" | cut -d'|' -f1 | tr -d '[:space:]')"
+    f_name="$(echo "$line" | cut -d'|' -f2 | sed 's/^ *//;s/ *$//')"
+    f_exp="$(echo "$line" | cut -d'|' -f3 | tr -d '[:space:]')"
+    [ "$f_ip" = "$my_ip" ] || continue
+    found_name="$f_name"; found_exp="$f_exp"
+    break
+  done < "$allow"
+  if [ -z "$found_exp" ]; then
+    echo "ERROR: IP VPS ini ($my_ip) TIDAK TERDAFTAR di izin-install.txt." >&2
+    echo "Instalasi DIBATALKAN." >&2
+    echo "Owner: tambahkan baris '$my_ip|Nama Penyewa|YYYY-MM-DD' ke izin-install.txt di GitHub (repo Darren, main), lalu jalankan ulang instalasi." >&2
+    exit 1
+  fi
+  # Tanggal berakhir harus format YYYY-MM-DD dan belum lewat.
+  if ! [[ "$found_exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "ERROR: Tanggal berakhir untuk IP $my_ip tidak valid ('$found_exp' — harus YYYY-MM-DD)." >&2
+    echo "Instalasi DIBATALKAN — owner: perbaiki baris itu di izin-install.txt." >&2
+    exit 1
+  fi
+  # Perbandingan string YYYY-MM-DD valid karena format fixed-width.
+  if [[ "$today" > "$found_exp" ]]; then
+    echo "ERROR: Masa sewa untuk IP $my_ip sudah BERAKHIR pada $found_exp (hari ini $today)." >&2
+    echo "Instalasi DIBATALKAN." >&2
+    echo "Owner: perpanjang tanggal berakhir di izin-install.txt di GitHub, lalu jalankan ulang instalasi." >&2
+    exit 1
+  fi
+  echo "Izin install OK: $my_ip — ${found_name:-tanpa nama} (berlaku s.d. $found_exp)."
+  LICENSE_NAME="$found_name"; LICENSE_EXP="$found_exp"; LICENSE_IP="$my_ip"
+}
+check_install_license
 # ---------- 5. Prompt konfigurasi (DIPINDAH ke sini, FASE 1) ----------
 # Prompt-prompt ini DULU ada di langkah 5 (setelah penghapusan total),
 # sehingga batal/EOF di prompt meninggalkan VPS telanjang. Sekarang semua
