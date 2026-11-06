@@ -2435,6 +2435,17 @@ bot.action('adm_installsrv_yes', async (ctx) => {
     `⏳ <b>Menginstal server ${esc(d.nama)} (${esc(d.ip)})...</b>\n\nProses ini bisa 5–15 menit (apt, Node, Xray, PKI OpenVPN). Bot tetap bisa dipakai untuk hal lain, tapi jangan restart bot selama instalasi berjalan. Hasil instalasi akan dikirim di sini.`,
     { parse_mode: 'HTML' }
   );
+  // BUGFIX 2026-11-06: instalasi 5–15 menit melebihi batas callback
+  // Telegram (~90 detik) → Telegraf melempar 'Promise timed out after
+  // 90000 milliseconds' dan bot.catch mengirim '❌ Terjadi kesalahan'
+  // padahal instalasi tetap jalan lalu sukses. Jalankan instalasi
+  // terlepas (detached): handler kembali seketika, hasil dikirim lewat
+  // sendMessage saat selesai. ctx.telegram dipakai langsung (ctx.reply
+  // tidak lagi andal setelah handler kembali).
+  const chatId = ctx.chat.id;
+  const send = (text, extra) => ctx.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', ...(extra || {}) }).catch(() => {});
+  const panel = () => adminPanel().reply_markup;
+  (async () => {
   let inst;
   try {
     inst = await installServer.installRemoteServer({ ip: d.ip, domain: d.domain || '' });
@@ -2442,33 +2453,38 @@ bot.action('adm_installsrv_yes', async (ctx) => {
     inst = { ok: false, message: 'Install gagal (error internal bot: ' + (e.message || e) + ').', tail: '' };
   }
   if (!inst.ok) {
-    return ctx.reply(
+    await send(
       `❌ <b>Instalasi GAGAL — server TIDAK didaftarkan.</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n\nAlasan: ${esc(inst.message || 'tidak diketahui')}\n\n${inst.tail ? `<b>Log akhir:</b>\n<pre>${esc(inst.tail.slice(-1500))}</pre>` : ''}\nPerbaiki VPS/kunci SSH-nya, lalu ulangi dari 🖥️ Install Server Baru.`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   // Instalasi sukses: baca kunci auth vpn-api, health check, lalu daftarkan.
   const apiAuth = await installServer.readRemoteAuth(d.ip).catch(() => null);
   if (!apiAuth) {
-    return ctx.reply(
+    await send(
       `⚠️ <b>Server terinstal, tapi kunci API tidak bisa dibaca.</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🔌 API: <code>${esc(apiBase)}</code>\n\nStack VPN sudah terpasang (installer lolos), tetapi bot tidak bisa membaca <code>/etc/vpn-api/auth.env</code> di VPS itu. Daftarkan manual via ➕ Tambah Server dengan API base di atas dan kunci dari file tersebut (baca lewat SSH manual).`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   const health = await srvTools.checkServerHealth(apiBase).catch(() => ({ ok: false, message: 'Health check gagal (error internal).' }));
   if (!health.ok) {
-    return ctx.reply(
+    await send(
       `⚠️ <b>Server terinstal, tapi health check API gagal.</b>\n\n📡 IP: <code>${esc(d.ip)}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🔌 API: <code>${esc(apiBase)}</code>\n\nAlasan: ${esc(health.message)}\n\nServer TIDAK didaftarkan otomatis. Periksa service vpn-api di VPS itu, lalu daftarkan manual via ➕ Tambah Server.`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   const { run } = require('./src/db');
   const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, active) VALUES (?,?,?,?,?,1)',
     [d.nama, d.domain || '', apiBase, apiAuth, d.harga]);
-  return ctx.reply(
+  await send(
     `✅ <b>Server baru terinstal & terdaftar!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n📡 IP: <code>${esc(d.ip)}</code>\n🌐 Domain: <code>${esc(d.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>terisi</b>\n💲 Harga: <b>Rp${Number(d.harga).toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer ini sudah muncul di pilihan server saat beli/trial VPN.`,
-    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    { reply_markup: panel() }
   );
+  })().catch(() => {});
+  return;
 });
 
 // ---------- Uninstall / Install Ulang / Monitoring Server ----------
@@ -2530,20 +2546,29 @@ bot.action(/^adm_uninstallsrv_yes_(\d+)$/, async (ctx) => {
     `⏳ <b>Meng-uninstall server ${esc(s.nama)} (${esc(ip)})...</b>\n\nBackup + hapus stack (bisa beberapa menit). Jangan restart bot selama proses berjalan.`,
     { parse_mode: 'HTML' }
   );
+  // Detached (lihat adm_installsrv_yes): uninstall menit-menit, jangan
+  // tahan handler melewati batas callback ~90 detik.
+  const chatId = ctx.chat.id;
+  const send = (text, extra) => ctx.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', ...(extra || {}) }).catch(() => {});
+  const panel = () => adminPanel().reply_markup;
+  (async () => {
   let un;
   try { un = await installServer.uninstallRemoteServer(ip); }
   catch (e) { un = { ok: false, message: 'Uninstall gagal (error internal bot: ' + (e.message || e) + ').', tail: '' }; }
   if (!un.ok) {
-    return ctx.reply(
+    await send(
       `❌ <b>Uninstall GAGAL — server tetap terdaftar.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n\nAlasan: ${esc(un.message || 'tidak diketahui')}\n\n${un.tail ? `<b>Log akhir:</b>\n<pre>${esc(un.tail.slice(-1500))}</pre>` : ''}\nPeriksa VPS/kunci SSH-nya, lalu ulangi.`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   await run('DELETE FROM servers WHERE id = ?', [id]);
-  return ctx.reply(
+  await send(
     `✅ <b>Server ter-uninstall & dihapus dari daftar.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n\nStack VPN di VPS itu sudah dihapus total (backup tersimpan di VPS itu). Akun VPN di server ini sudah tidak berfungsi.`,
-    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    { reply_markup: panel() }
   );
+  })().catch(() => {});
+  return;
 });
 
 // --- Install Ulang Server ---
@@ -2589,34 +2614,45 @@ bot.action(/^adm_reinstallsrv_yes_(\d+)$/, async (ctx) => {
     `⏳ <b>Meng-install ulang server ${esc(s.nama)} (${esc(ip)})...</b>\n\nUninstall total lalu install fresh (bisa 5–15 menit). Jangan restart bot selama proses berjalan. Hasil akan dikirim di sini.`,
     { parse_mode: 'HTML' }
   );
+  // Detached (lihat adm_installsrv_yes): install ulang menit-menit, jangan
+  // tahan handler melewati batas callback ~90 detik.
+  const chatId = ctx.chat.id;
+  const send = (text, extra) => ctx.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', ...(extra || {}) }).catch(() => {});
+  const panel = () => adminPanel().reply_markup;
+  (async () => {
   let re;
   try { re = await installServer.reinstallRemoteServer({ ip, domain: s.domain || '' }); }
   catch (e) { re = { ok: false, stage: '?', message: 'Install ulang gagal (error internal bot: ' + (e.message || e) + ').', tail: '' }; }
   if (!re.ok) {
-    return ctx.reply(
+    await send(
       `❌ <b>Install Ulang GAGAL di tahap ${esc(re.stage || '?')} — server tetap terdaftar dengan data lama.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n\nAlasan: ${esc(re.message || 'tidak diketahui')}\n\n${re.tail ? `<b>Log akhir:</b>\n<pre>${esc(re.tail.slice(-1500))}</pre>` : ''}\nPeriksa VPS/kunci SSH-nya, lalu ulangi.`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   const apiAuth = await installServer.readRemoteAuth(ip).catch(() => null);
   if (!apiAuth) {
-    return ctx.reply(
+    await send(
       `⚠️ <b>Server ter-install ulang, tapi kunci API baru tidak bisa dibaca.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n\nStack sudah fresh, tetapi bot tidak bisa membaca <code>/etc/vpn-api/auth.env</code> di VPS itu. Perbarui kunci API server ini manual via 🔑 Edit API Key (baca kunci dari file itu lewat SSH).`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   const health = await srvTools.checkServerHealth(apiBase).catch(() => ({ ok: false, message: 'Health check gagal (error internal).' }));
   if (!health.ok) {
-    return ctx.reply(
+    await send(
       `⚠️ <b>Server ter-install ulang, tapi health check API gagal.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n\nAlasan: ${esc(health.message)}\n\nKunci API baru sudah dibaca, tapi server belum bisa dipakai. Periksa service vpn-api di VPS itu.`,
-      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+      { reply_markup: panel() }
     );
+    return;
   }
   await run('UPDATE servers SET api_auth = ? WHERE id = ?', [apiAuth, id]);
-  return ctx.reply(
+  await send(
     `✅ <b>Server berhasil di-install ulang & aktif!</b>\n\n🆔 ID: <code>${s.id}</code>\n📝 Nama: <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>baru (diperbarui otomatis)</b>\n💲 Harga: <b>Rp${Number(s.harga).toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer sudah bisa dipakai lagi. Akun VPN lama di server ini sudah terhapus (Xray fresh).`,
-    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    { reply_markup: panel() }
   );
+  })().catch(() => {});
+  return;
 });
 
 // --- Monitoring Server ---
