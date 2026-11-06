@@ -126,16 +126,18 @@ async function sendMenuPhoto(...args) {
 
 // ---------- Helper ----------
 const mainMenu = (isAdmin = false, isReseller = false) => {
+  // Slim & rapi: 2 tombol per baris, label pendek — menu utama muat dalam
+  // 4-5 baris walau ada panel reseller/admin. Callback tidak berubah.
   const rows = [
-    [sBtn('🌐 Menu VPN', 'menu_vpn_home', 'success')],
-    [sBtn('🛒 Menu PPOB', 'menu_ppob', 'primary')],
-    [sBtn('💰 TopUp Saldo', 'ppob_deposit', 'success')],
-    [sBtn('📝 Riwayat Transaksi', 'menu_riwayat', 'primary'), sBtn('📊 Cek Statistik', 'menu_stat', 'primary')],
-    [sBtn('🚀 Cek Kuota XL/AXIS', 'menu_kuota', 'primary'), sBtn('📜 Sewa Script', 'menu_sewa', 'primary')],
-    [sBtn('👤 Akun Saya', 'menu_akun', 'primary')],
+    [sBtn('🌐 VPN', 'menu_vpn_home', 'success'), sBtn('🛒 PPOB', 'menu_ppob', 'primary')],
+    [sBtn('💰 Top Up', 'ppob_deposit', 'success'), sBtn('📝 Riwayat', 'menu_riwayat', 'primary')],
+    [sBtn('🚀 Cek Kuota', 'menu_kuota', 'primary'), sBtn('📜 Sewa Script', 'menu_sewa', 'primary')],
+    [sBtn('📊 Statistik', 'menu_stat', 'primary'), sBtn('👤 Akun Saya', 'menu_akun', 'primary')],
   ];
-  if (isReseller) rows.push([sBtn('🏪 Panel Reseller', 'menu_reseller', 'success')]);
-  if (isAdmin) rows.push([sBtn('🛠️ Panel Admin', 'adm_open', 'danger')]);
+  const panels = [];
+  if (isReseller) panels.push(sBtn('🏪 Reseller', 'menu_reseller', 'success'));
+  if (isAdmin) panels.push(sBtn('🛠️ Admin', 'adm_open', 'danger'));
+  if (panels.length) rows.push(panels);
   return Markup.inlineKeyboard(rows);
 };
 
@@ -165,24 +167,19 @@ bot.action('cancel_flow', async (ctx) => {
 // ---------- Panel Admin ----------
 const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('➕ Tambah Server', 'adm_addserver', 'success'), sBtn('❌ Hapus Server', 'adm_delserver', 'danger')],
-  [sBtn('🖥️ Install Server Baru', 'adm_installsrv', 'success')],
+  [sBtn('🖥️ Install Server Baru', 'adm_installsrv', 'success'), sBtn('📊 Monitoring Server', 'adm_monitor', 'success')],
   [sBtn('🔄 Install Ulang Server', 'adm_reinstallsrv', 'primary'), sBtn('🗑️ Uninstall Server', 'adm_uninstallsrv', 'danger')],
-  [sBtn('📊 Monitoring Server', 'adm_monitor', 'success')],
   [sBtn('💲 Edit Harga', 'adm_editharga', 'primary'), sBtn('📝 Edit Nama', 'adm_editnama', 'primary')],
   [sBtn('🌍 Edit Negara', 'adm_editcountry', 'primary'), sBtn('🌐 Edit Domain', 'adm_editdomain', 'primary')],
   [sBtn('💲 Harga VPN/Role', 'adm_vpnprices', 'primary'), sBtn('👥 Kelola Role', 'adm_roles', 'primary')],
-  [sBtn('📋 List Server', 'adm_listserver', 'success')],
-  [sBtn('🖥️ Live Server', 'adm_liveserver', 'success')],
-  [sBtn('⚙️ Pengaturan & API Key', 'adm_api', 'primary')],
-  [sBtn('🔌 Edit API Base', 'adm_editapi', 'primary')],
-  [sBtn('🔑 Edit API Key', 'adm_editkey', 'primary')],
+  [sBtn('📋 List Server', 'adm_listserver', 'success'), sBtn('🖥️ Live Server', 'adm_liveserver', 'success')],
+  [sBtn('⚙️ Pengaturan & API Key', 'adm_api', 'primary'), sBtn('🔑 Edit API Key', 'adm_editkey', 'primary')],
+  [sBtn('🔌 Edit API Base', 'adm_editapi', 'primary'), sBtn('📊 Jumlah Akun', 'adm_akun', 'primary')],
   [sBtn('💵 Tambah Saldo', 'adm_addsaldo', 'success'), sBtn('➖ Kurangi Saldo', 'adm_minsaldo', 'danger')],
   [sBtn('📊 Hasil Penjualan', 'adm_sales', 'primary'), sBtn('📑 Log Topup', 'adm_topuplog', 'primary')],
   [sBtn('📦 Backup DB', 'adm_backupdb', 'success'), sBtn('♻️ Restore DB', 'adm_restoredb', 'danger')],
-  [sBtn('🎁 Bonus & Reseller', 'adm_bonus', 'success')],
+  [sBtn('🎁 Bonus & Reseller', 'adm_bonus', 'success'), sBtn('🔍 Review Deposit/Sewa', 'adm_review', 'primary')],
   [sBtn('💰 Min. Deposit/Role', 'adm_mindep', 'primary'), sBtn('📈 Margin PPOB', 'adm_margin', 'success')],
-  [sBtn('📊 Jumlah Akun', 'adm_akun', 'primary')],
-  [sBtn('🔍 Review Deposit/Sewa', 'adm_review', 'primary')],
   [sBtn('📢 Broadcast Grup', 'adm_bcast', 'primary'), sBtn('📣 Broadcast User', 'adm_bcastuser', 'primary')],
   [sBtn('🔔 Grup Notifikasi', 'adm_notifgrp', 'primary'), sBtn('🔒 Force Join', 'adm_forcejoin', 'primary')],
   [sBtn('🔑 Setting ePro (HC)', 'adm_epro', 'primary'), sBtn('📲 List Preset HC', 'adm_hcpresets', 'success')],
@@ -210,13 +207,13 @@ async function getServers() {
 
 const vpnMenu = (cf = false) => {
   const p = cf ? 'cf_' : '';
+  // Slim: protokol dipasangkan 2 per baris, Trial + Top Up sebaris —
+  // 5 baris (dari 7). Callback tidak berubah.
   return Markup.inlineKeyboard([
     [sBtn('🖥️ SSH', `${p}mk_ssh`, 'danger'), sBtn('📡 VMess', `${p}mk_vmess`, 'success')],
     [sBtn('⚡ VLess', `${p}mk_vless`, 'primary'), sBtn('🛡️ Trojan', `${p}mk_trojan`, 'success')],
-    [sBtn('👻 Shadowsocks', `${p}mk_shadowsocks`, 'primary')],
-    [sBtn('⚡ Zivpn UDP', `${p}mk_zivpn`, 'success')],
-    [sBtn('🎁 Trial 1 Jam (Gratis)', `${p}mk_trial`, 'primary')],
-    [sBtn('💰 Topup Saldo', 'ppob_deposit', 'success')],
+    [sBtn('👻 Shadowsocks', `${p}mk_shadowsocks`, 'primary'), sBtn('⚡ Zivpn UDP', `${p}mk_zivpn`, 'success')],
+    [sBtn('🎁 Trial 1 Jam', `${p}mk_trial`, 'primary'), sBtn('💰 Top Up', 'ppob_deposit', 'success')],
     [sBtn('🔙 Kembali', 'menu_main', 'danger')],
   ]);
 };
@@ -372,10 +369,9 @@ bot.action('menu_vpn_home', async (ctx) => {
 ━━━━━━━━━━━━━━━━━━
 Pilih layanan VPN:`,
     Markup.inlineKeyboard([
-      [sBtn('🛰️ VPN Premium', 'menu_vpn', 'success'), sBtn('☁️ VPN CloudFront', 'menu_cf', 'primary')],
+      [sBtn('🛰️ Premium', 'menu_vpn', 'success'), sBtn('☁️ CloudFront', 'menu_cf', 'primary')],
       [sBtn('📊 Cek Kuota', 'menu_kuota', 'primary'), sBtn('💰 Sewa Script', 'menu_sewa', 'success')],
-      [sBtn('📈 Statistik', 'menu_stat', 'primary')],
-      [sBtn('🔙 Kembali', 'menu_main', 'danger')],
+      [sBtn('📈 Statistik', 'menu_stat', 'primary'), sBtn('🔙 Kembali', 'menu_main', 'danger')],
     ]));
 });
 
