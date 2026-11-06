@@ -2408,14 +2408,15 @@ bot.action('adm_installsrv', async (ctx) => {
   await safeCb(ctx);
   sessions.set(ctx.chat.id, { step: 'adm_installsrv_ip', data: {} });
   // Kunci SSH installer tampil OTOMATIS di bot (kunci PUBLIK, aman
-  // disalin) supaya admin tidak perlu menanyakannya lagi sebelum
-  // membuat droplet baru.
+  // disalin) + perintah sekali-tempel untuk VPS yang sudah jadi,
+  // supaya admin tidak perlu menanyakannya lagi dan tidak salah
+  // tempel kunci sebagai perintah (kasus 2026-11-06: 'command not found').
   const pubKey = (typeof installServer.getInstallerPublicKey === 'function') ? installServer.getInstallerPublicKey() : null;
   const keyBlock = pubKey
-    ? `\n\n🔑 <b>Kunci SSH installer (tempel ke VPS baru):</b>\n<code>${esc(pubKey)}</code>`
+    ? `\n\n🔑 <b>Pasang kunci SSH installer dulu — pilih 1 cara:</b>\n\n1️⃣ <b>Saat buat droplet</b> (paling mudah): di DigitalOcean, tambah kunci ini di bagian SSH keys:\n<code>${esc(pubKey)}</code>\n\n2️⃣ <b>Droplet sudah jadi:</b> buka terminal VPS baru, tempel perintah ini lalu Enter (sekali saja):\n<code>${esc(`mkdir -p ~/.ssh; echo '${pubKey}' >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; echo OK`)}</code>\n\nKalau muncul <b>OK</b>, kunci sudah terpasang. Kalau instalasi gagal di langkah SSH, berarti kunci belum terpasang.`
     : `\n\n⚠️ <b>Kunci SSH installer tidak ditemukan</b> di server bot — instalasi akan gagal di langkah SSH. Buat dulu keypair-nya.`;
   await ctx.reply(
-    '🖥️ <b>Install Server Baru</b>\n\nBot akan menginstal stack VPN Darren (mode remote, tanpa bot Telegram) ke VPS baru lewat SSH, lalu mendaftarkan server itu otomatis.\n\n<b>Prasyarat:</b> kunci SSH installer bot sudah ditambahkan ke VPS baru lewat konsol provider (DigitalOcean). Bila belum, instalasi akan gagal di langkah SSH.' + keyBlock + '\n\nKetik <b>IP VPS baru</b> (contoh: 146.190.107.177):',
+    '🖥️ <b>Install Server Baru</b>\n\nBot akan menginstal stack VPN Darren (mode remote, tanpa bot Telegram) ke VPS baru lewat SSH, lalu mendaftarkan server itu otomatis.' + keyBlock + '\n\nKetik <b>IP VPS baru</b> (contoh: 146.190.107.177):',
     { parse_mode: 'HTML', ...cancelKb() }
   );
 });
