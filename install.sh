@@ -982,23 +982,43 @@ if [ -f /etc/haproxy/hap.pem ] && haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/n
   systemctl restart haproxy 2>/dev/null || systemctl start haproxy 2>/dev/null || echo "PERINGATAN: haproxy gagal start — gate akan menandainya." >&2
 elif [ -n "${EFFECTIVE_DOMAIN:-}" ] && ! ss -ltn 2>/dev/null | grep -q ':80 '; then
   echo "Mencoba sertifikat LE untuk $EFFECTIVE_DOMAIN via acme.sh resmi (gagal = TLS pending, bukan gagal total)..."
-  if [ ! -d "$HOME/.acme.sh" ]; then
-    rm -f /tmp/acme-install.sh
-    curl -fsSL --retry 2 -o /tmp/acme-install.sh "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" 2>/dev/null || echo "Unduhan acme.sh gagal — TLS pending." >&2
+  # BUGFIX 2026-11-06 (SG2): 4 perbaikan di blok LE ini —
+  # (a) dulu cek direktori ~/.acme.sh saja; direktori KOSONG (sisa install
+  #     gagal) membuat installer melewati install acme.sh, padahal
+  #     binarinya tidak ada → LE tidak pernah dicoba. Cek binari-nya.
+  # (b) dulu unduh sebagai /tmp/acme-install.sh lalu 'sh ... --install';
+  #     acme.sh master kini gagal 'cp: cannot stat acme.sh' bila nama
+  #     filenya bukan acme.sh. Unduh sebagai acme.sh di dir sendiri.
+  # (c) default CA acme.sh kini ZeroSSL (butuh email registrasi) → paksa
+  #     LetsEncrypt (tanpa email) via --set-default-ca.
+  # (d) dulu --webroot /var/www/html padahal port 80 BEBAS (tidak ada yang
+  #     melayani challenge) → LE 'Connection refused'. Pakai --standalone
+  #     (acme.sh mengikat port 80 sendiri — cocok dengan cek port 80 bebas).
+  # (e) acme.sh kini default sertifikat ECC → direktori ${DOMAIN}_ecc,
+  #     bukan $DOMAIN. Cek kedua lokasi saat membuat hap.pem.
+  if [ ! -x "$HOME/.acme.sh/acme.sh" ]; then
+    rm -rf /tmp/acme-src
+    mkdir -p /tmp/acme-src
+    (cd /tmp/acme-src && curl -fsSL --retry 2 -o acme.sh "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" 2>/dev/null) || echo "Unduhan acme.sh gagal — TLS pending." >&2
     # Catatan: acme.sh resmi dijalankan dari salinan resminya; bila unduhan
     # di atas gagal/ragu, LEWATI langkah ini dan lanjut sebagai TLS pending.
-    if [ -s /tmp/acme-install.sh ]; then
-      sh /tmp/acme-install.sh --install 2>/dev/null || echo "Instalasi acme.sh gagal — TLS pending." >&2
-      rm -f /tmp/acme-install.sh
+    if [ -s /tmp/acme-src/acme.sh ]; then
+      (cd /tmp/acme-src && sh acme.sh --install 2>/dev/null) || echo "Instalasi acme.sh gagal — TLS pending." >&2
+      rm -rf /tmp/acme-src
     fi
   fi
   if [ -x "$HOME/.acme.sh/acme.sh" ]; then
-    "$HOME/.acme.sh/acme.sh" --issue -d "$EFFECTIVE_DOMAIN" --webroot /var/www/html 2>/dev/null || echo "Penerbitan LE gagal (DNS belum mengarah / validasi gagal) — TLS pending." >&2
-    if [ -f "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/fullchain.cer" ] && [ -f "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/$EFFECTIVE_DOMAIN.key" ]; then
-      cat "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/fullchain.cer" "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/$EFFECTIVE_DOMAIN.key" > /etc/haproxy/hap.pem
+    "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt 2>/dev/null || true
+    "$HOME/.acme.sh/acme.sh" --issue -d "$EFFECTIVE_DOMAIN" --standalone --server letsencrypt 2>/dev/null || echo "Penerbitan LE gagal (DNS belum mengarah / validasi gagal) — TLS pending." >&2
+    _certdir=""
+    for _d in "$HOME/.acme.sh/$EFFECTIVE_DOMAIN" "$HOME/.acme.sh/${EFFECTIVE_DOMAIN}_ecc"; do
+      if [ -f "$_d/fullchain.cer" ] && [ -f "$_d/$EFFECTIVE_DOMAIN.key" ]; then _certdir="$_d"; break; fi
+    done
+    if [ -n "$_certdir" ]; then
+      cat "$_certdir/fullchain.cer" "$_certdir/$EFFECTIVE_DOMAIN.key" > /etc/haproxy/hap.pem
       chmod 600 /etc/haproxy/hap.pem
-      cp -a "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/fullchain.cer" /etc/xray/xray.crt 2>/dev/null || true
-      cp -a "$HOME/.acme.sh/$EFFECTIVE_DOMAIN/$EFFECTIVE_DOMAIN.key" /etc/xray/xray.key 2>/dev/null || true
+      cp -a "$_certdir/fullchain.cer" /etc/xray/xray.crt 2>/dev/null || true
+      cp -a "$_certdir/$EFFECTIVE_DOMAIN.key" /etc/xray/xray.key 2>/dev/null || true
       chmod 600 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
     fi
   fi
