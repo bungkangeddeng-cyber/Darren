@@ -337,12 +337,15 @@ else
   git_clone_darren "$SRC_DIR"
   echo "HEAD source baru: $(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo tidak-terbaca)"
 fi
-# ---------- 4b. Izin install (allowlist GitHub) ----------
+# ---------- 4b. Izin install (allowlist GitHub) — SERVER UTAMA SAJA ----------
 # File allowlist di repo: izin-install.txt (format IP|Nama|YYYY-MM-DD).
 # Owner mengelola penyewa cukup dengan mengedit file itu di GitHub
 # (nama, IP, tanggal berakhir sewa). Installer memeriksa IP publik VPS
 # ini + masa sewa SEBELUM instalasi apa pun — tidak terdaftar atau
 # sudah kedaluwarsa = instalasi DIBATALKAN (fail-closed).
+# BERLAKU HANYA untuk server utama (instalasi penuh + bot, REMOTE=0).
+# Mode --remote (server remote via menu Tambah Server di bot) TIDAK
+# dicek — itu node VPN milik owner, bukan instalasi Darren baru.
 # File dibaca dari clone segar ($SRC_DIR) — clone di atas selalu
 # memastikan HEAD sama dengan remote, jadi daftarnya yang terbaru.
 # Repo private: clone sudah memakai GH_TOKEN, file ikut terbawa.
@@ -402,7 +405,15 @@ check_install_license() {
   echo "Izin install OK: $my_ip — ${found_name:-tanpa nama} (berlaku s.d. $found_exp)."
   LICENSE_NAME="$found_name"; LICENSE_EXP="$found_exp"; LICENSE_IP="$my_ip"
 }
-check_install_license
+# Izin install HANYA untuk server utama (instalasi penuh + bot).
+# Mode --remote (server remote lewat menu Tambah Server di bot) TIDAK
+# butuh izin IP — server remote itu node VPN milik owner yang dikelola
+# bot utama, bukan instalasi Darren baru. Jadi cek dilewati di sana.
+if [ "$REMOTE" = 0 ]; then
+  check_install_license
+else
+  echo "Mode remote: cek izin install dilewati (server remote tidak butuh izin IP — izin hanya untuk server utama)."
+fi
 # ---------- 5. Prompt konfigurasi (DIPINDAH ke sini, FASE 1) ----------
 # Prompt-prompt ini DULU ada di langkah 5 (setelah penghapusan total),
 # sehingga batal/EOF di prompt meninggalkan VPS telanjang. Sekarang semua
