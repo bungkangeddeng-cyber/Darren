@@ -97,6 +97,10 @@ async function init() {
     api_auth TEXT DEFAULT '',
     active INTEGER DEFAULT 0
   )`);
+  // Migrasi: kolom country (kode negara ISO 2 huruf, mis. ID/SG) untuk
+  // bendera di pemilih server saat beli VPN. ALTER gagal bila kolom
+  // sudah ada — abaikan (idempotent).
+  await run(`ALTER TABLE servers ADD COLUMN country TEXT DEFAULT ''`).catch(() => {});
 
   await run(`CREATE TABLE IF NOT EXISTS bonus_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),

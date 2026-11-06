@@ -23,6 +23,7 @@ const vpn = require('./modules/vpn');
 const srvTools = require('./modules/servers');
 const installServer = require('./src/install-server');
 const liveServer = require('./src/live-server');
+const country = require('./src/country');
 const apiSettings = require('./src/api-settings');
 const ppob = require('./modules/ppob');
 const h2h = require('./src/h2h');
@@ -168,8 +169,9 @@ const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('🔄 Install Ulang Server', 'adm_reinstallsrv', 'primary'), sBtn('🗑️ Uninstall Server', 'adm_uninstallsrv', 'danger')],
   [sBtn('📊 Monitoring Server', 'adm_monitor', 'success')],
   [sBtn('💲 Edit Harga', 'adm_editharga', 'primary'), sBtn('📝 Edit Nama', 'adm_editnama', 'primary')],
+  [sBtn('🌍 Edit Negara', 'adm_editcountry', 'primary'), sBtn('🌐 Edit Domain', 'adm_editdomain', 'primary')],
   [sBtn('💲 Harga VPN/Role', 'adm_vpnprices', 'primary'), sBtn('👥 Kelola Role', 'adm_roles', 'primary')],
-  [sBtn('🌐 Edit Domain', 'adm_editdomain', 'primary'), sBtn('📋 List Server', 'adm_listserver', 'success')],
+  [sBtn('📋 List Server', 'adm_listserver', 'success')],
   [sBtn('🖥️ Live Server', 'adm_liveserver', 'success')],
   [sBtn('⚙️ Pengaturan & API Key', 'adm_api', 'primary')],
   [sBtn('🔌 Edit API Base', 'adm_editapi', 'primary')],
@@ -420,6 +422,48 @@ bot.action('menu_cf', async (ctx) => {
 // ---------- Buat akun VPN ----------
 const PROTO_LABEL = { ssh: 'SSH', vmess: 'VMess', vless: 'VLess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', zivpn: 'Zivpn UDP' };
 
+// ---------- Pemilih server saat beli (bendera + paginasi) ----------
+// Tiap server wajib punya bendera (kolom country, mis. ID/SG) — tampil
+// sebagai emoji di tombol. Daftar diambil dari DB (otomatis, bukan
+// hardcode) dan dipaginasi 8 server/halaman supaya tetap jalan walau
+// admin mendaftarkan 100 server (batas tombol Telegram per pesan).
+const SRV_PAGE_SIZE = 8;
+let mainCountryCache = null;
+async function mainFlag() {
+  if (mainCountryCache === null) {
+    const ip = await installServer.getMainBotIp().catch(() => '');
+    mainCountryCache = ip ? await country.detectCountry(ip).catch(() => '') : '';
+  }
+  return country.flagFor(mainCountryCache);
+}
+async function showServerPicker(ctx, page) {
+  const sess = sessions.get(ctx.chat.id);
+  const viaCF = !!sess?.pendingCf;
+  const servers = await vpn.listBuyServers().catch(() => []);
+  const totalPages = Math.max(1, Math.ceil(servers.length / SRV_PAGE_SIZE));
+  const p = Math.min(Math.max(0, page || 0), totalPages - 1);
+  const start = p * SRV_PAGE_SIZE;
+  const slice = servers.slice(start, start + SRV_PAGE_SIZE);
+  const rows = [];
+  if (p === 0) rows.push([sBtn(`${await mainFlag()} Server Utama (${config.vpn.domain})`, 'vpn_srv_0', 'primary')]);
+  for (const sv of slice) rows.push([sBtn(`${country.flagFor(sv.country)} ${sv.nama} (${sv.domain})`, `vpn_srv_${sv.id}`, 'success')]);
+  const nav = [];
+  if (p > 0) nav.push(sBtn('⬅️ Sebelumnya', `vpn_srvpage_${p - 1}`, 'primary'));
+  if (p < totalPages - 1) nav.push(sBtn(`➡️ Berikutnya (${p + 2}/${totalPages})`, `vpn_srvpage_${p + 1}`, 'primary'));
+  if (nav.length) rows.push(nav);
+  rows.push([sBtn('🔙 Kembali', viaCF ? 'menu_cf' : 'menu_vpn', 'danger')]);
+  const text = `🌐 <b>Pilih Server</b>\n\nAkun akan dibuat di server yang kamu pilih:${totalPages > 1 ? ` (hal ${p + 1}/${totalPages})` : ''}`;
+  return { text, reply_markup: { inline_keyboard: rows } };
+}
+bot.action(/^vpn_srvpage_(\d+)$/, async (ctx) => {
+  await safeCb(ctx);
+  const sess = sessions.get(ctx.chat.id);
+  if (!sess?.pendingProto) return ctx.reply('❌ Sesi pembelian tidak ditemukan. Ulangi dari menu.');
+  const picker = await showServerPicker(ctx, Number(ctx.match[1]));
+  try { await ctx.editMessageText(picker.text, { parse_mode: 'HTML', reply_markup: picker.reply_markup }); }
+  catch (_) { await ctx.reply(picker.text, { parse_mode: 'HTML', reply_markup: picker.reply_markup }); }
+});
+
 async function handleCreate(ctx, proto, viaCF) {
   const chatId = ctx.chat.id;
   // Pilih server dulu bila ada server AKTIF terdaftar (health check
@@ -428,10 +472,8 @@ async function handleCreate(ctx, proto, viaCF) {
   const servers = await vpn.listBuyServers().catch(() => []);
   if (servers.length) {
     sessions.set(chatId, { pendingProto: proto, pendingCf: viaCF });
-    const rows = [[sBtn(`🏠 Server Utama (${config.vpn.domain})`, 'vpn_srv_0', 'primary')]];
-    for (const sv of servers) rows.push([sBtn(`🌐 ${sv.nama} (${sv.domain})`, `vpn_srv_${sv.id}`, 'success')]);
-    rows.push([sBtn('🔙 Kembali', viaCF ? 'menu_cf' : 'menu_vpn', 'danger')]);
-    await ctx.reply('🌐 <b>Pilih Server</b>\n\nAkun akan dibuat di server yang kamu pilih:', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard(rows) });
+    const picker = await showServerPicker(ctx, 0);
+    await ctx.reply(picker.text, { parse_mode: 'HTML', reply_markup: picker.reply_markup });
     await safeCb(ctx);
     return;
   }
@@ -1208,11 +1250,15 @@ bot.on('text', async (ctx) => {
       );
     }
     const { run } = require('./src/db');
-    const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, active) VALUES (?,?,?,?,?,1)',
-      [d.nama, d.domain, apiBase, d.api_auth || '', harga]);
+    // Negara terdeteksi otomatis dari IP/host API (untuk bendera di
+    // pemilih server); gagal deteksi -> '' (admin bisa isi via Edit Negara).
+    const hostM = String(apiBase || '').match(/https?:\/\/([^:/]+)/);
+    const srvCountry = hostM ? await country.detectCountry(hostM[1]).catch(() => '') : '';
+    const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, country, active) VALUES (?,?,?,?,?,?,1)',
+      [d.nama, d.domain, apiBase, d.api_auth || '', harga, srvCountry]);
     sessions.delete(chatId);
     return ctx.reply(
-      `✅ <b>Server ditambahkan!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🌐 Domain: <code>${esc(d.domain)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>${d.api_auth ? 'terisi' : 'kosong (tanpa auth)'}</b>\n💲 Harga: <b>Rp${harga.toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>`,
+      `✅ <b>Server ditambahkan!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n🌐 Domain: <code>${esc(d.domain)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>${d.api_auth ? 'terisi' : 'kosong (tanpa auth)'}</b>\n💲 Harga: <b>Rp${harga.toLocaleString('id-ID')}/hari</b>\n${country.flagFor(srvCountry)} Negara: <b>${esc(srvCountry || 'belum terdeteksi — isi via 🌍 Edit Negara')}</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>`,
       { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
     );
   }
@@ -2477,10 +2523,12 @@ bot.action('adm_installsrv_yes', async (ctx) => {
     return;
   }
   const { run } = require('./src/db');
-  const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, active) VALUES (?,?,?,?,?,1)',
-    [d.nama, d.domain || '', apiBase, apiAuth, d.harga]);
+  // Negara terdeteksi otomatis dari IP (untuk bendera di pemilih server).
+  const srvCountry = await country.detectCountry(d.ip).catch(() => '');
+  const r = await run('INSERT INTO servers (nama, domain, api_base, api_auth, harga, country, active) VALUES (?,?,?,?,?,?,1)',
+    [d.nama, d.domain || '', apiBase, apiAuth, d.harga, srvCountry]);
   await send(
-    `✅ <b>Server baru terinstal & terdaftar!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n📡 IP: <code>${esc(d.ip)}</code>\n🌐 Domain: <code>${esc(d.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>terisi</b>\n💲 Harga: <b>Rp${Number(d.harga).toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer ini sudah muncul di pilihan server saat beli/trial VPN.`,
+    `✅ <b>Server baru terinstal & terdaftar!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n📡 IP: <code>${esc(d.ip)}</code>\n🌐 Domain: <code>${esc(d.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>terisi</b>\n💲 Harga: <b>Rp${Number(d.harga).toLocaleString('id-ID')}/hari</b>\n${country.flagFor(srvCountry)} Negara: <b>${esc(srvCountry || 'belum terdeteksi — isi via 🌍 Edit Negara')}</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer ini sudah muncul di pilihan server saat beli/trial VPN.`,
     { reply_markup: panel() }
   );
   })().catch(() => {});
@@ -2807,6 +2855,77 @@ bot.action(/^adm_editnama_(\d+)$/, async (ctx) => {
 });
 
 // Edit domain: pilih server -> ketik domain baru
+// Edit negara (bendera): pilih server -> pilih negara -> simpan.
+// Bendera tampil di pemilih server saat beli VPN; negara juga terdeteksi
+// otomatis dari IP saat server didaftarkan, ini untuk mengubahnya.
+bot.action('adm_editcountry', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const rows = await getServers();
+  if (!rows.length) return ctx.reply('❌ Belum ada server. Tambah dulu via ➕ Tambah Server.');
+  const kb = rows.map((s) => [sBtn(`${country.flagFor(s.country)} ${s.nama} (${s.domain || '-'})`, `adm_editcountry_${s.id}`, 'primary')]);
+  kb.push([sBtn('🔙 Kembali', 'adm_back', 'danger')]);
+  await ctx.reply('🌍 <b>Edit Negara (Bendera)</b>\n\nPilih server yang benderanya mau diubah:', {
+    parse_mode: 'HTML', reply_markup: { inline_keyboard: kb },
+  });
+});
+bot.action(/^adm_editcountry_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const { get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  const kb = [];
+  for (let i = 0; i < country.COMMON_COUNTRIES.length; i += 2) {
+    const row = [];
+    for (const [code, name] of country.COMMON_COUNTRIES.slice(i, i + 2)) {
+      row.push(sBtn(`${country.flagFor(code)} ${name}`, `adm_editcountry_set_${id}_${code}`, 'primary'));
+    }
+    kb.push(row);
+  }
+  kb.push([sBtn('🔄 Deteksi otomatis dari IP', `adm_editcountry_auto_${id}`, 'success')]);
+  kb.push([sBtn('🔙 Kembali', 'adm_back', 'danger')]);
+  await ctx.reply(
+    `🌍 <b>Edit Negara — ${esc(s.nama)}</b>\n\nBendera saat ini: <b>${country.flagFor(s.country)} ${esc(s.country || '(belum diset)')}</b>\n\nPilih negara untuk server ini:`,
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } }
+  );
+});
+bot.action(/^adm_editcountry_set_(\d+)_([A-Z]{2})$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const code = ctx.match[2];
+  const { run, get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  await run('UPDATE servers SET country = ? WHERE id = ?', [code, id]);
+  await ctx.reply(
+    `✅ <b>Negara ${esc(s.nama)} diubah.</b>\n\n${country.flagFor(code)} Bendera baru: <b>${code}</b>\n\nBendera ini tampil di pemilih server saat beli VPN.`,
+    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+  );
+});
+bot.action(/^adm_editcountry_auto_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const { run, get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  const ip = serverIp(s);
+  const code = ip ? await country.detectCountry(ip).catch(() => '') : '';
+  if (!code) {
+    return ctx.reply(
+      `❌ <b>Deteksi otomatis gagal.</b>\n\nNegara server <b>${esc(s.nama)}</b> tidak bisa dideteksi dari IP (${esc(ip || '-')}). Pilih negara manual dari daftar.`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  await run('UPDATE servers SET country = ? WHERE id = ?', [code, id]);
+  await ctx.reply(
+    `✅ <b>Negara ${esc(s.nama)} terdeteksi otomatis.</b>\n\n${country.flagFor(code)} Bendera: <b>${code}</b>\n\nBendera ini tampil di pemilih server saat beli VPN.`,
+    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+  );
+});
 bot.action('adm_editdomain', async (ctx) => {
   if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
   await safeCb(ctx);
