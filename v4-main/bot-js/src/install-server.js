@@ -151,4 +151,69 @@ function getInstallerPublicKey() {
   } catch (_) { return null; }
 }
 
-module.exports = { validIp, validDomain, validPublicIp, getMainBotIp, installRemoteServer, readRemoteAuth, getInstallerPublicKey, INSTALL_KEY };
+// Jalankan uninstaller di VPS remote (backup + hapus stack Darren).
+// Mengembalikan { ok, message?, tail?, output?, code? }.
+const UNINSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+async function uninstallRemoteServer(ip) {
+  if (!fs.existsSync(INSTALL_KEY)) {
+    return {
+      ok: false,
+      message: 'Kunci SSH installer belum dibuat di server bot (' + INSTALL_KEY + ' tidak ada). Buat dulu keypair-nya, lalu tambahkan kunci publik ke VPS itu lewat konsol provider.',
+      tail: '',
+    };
+  }
+  const cmd = `curl -fsSL https://raw.githubusercontent.com/bungkangeddeng-cyber/Darren/main/uninstall.sh -o /tmp/darren-uninstall-remote.sh && chmod +x /tmp/darren-uninstall-remote.sh && echo YA | bash /tmp/darren-uninstall-remote.sh`;
+  const r = await runSsh(ip, cmd, UNINSTALL_TIMEOUT_MS);
+  const lines = String(r.output || '').split('\n');
+  const tail = lines.slice(-40).join('\n');
+  if (!r.ok) {
+    const why = r.timedOut
+      ? 'waktu habis (10 menit) — uninstall mungkin masih berjalan di VPS; cek lewat SSH manual'
+      : `keluar dengan kode ${r.code}`;
+    return { ok: false, message: `SSH/uninstall gagal (${why}).`, tail, code: r.code };
+  }
+  // Uninstaller mencetak "=== Selesai uninstall ===" + "Backup: ..." bila sukses.
+  if (!/=== Selesai uninstall ===/.test(r.output)) {
+    return {
+      ok: false,
+      message: 'Uninstaller selesai tanpa penanda sukses (tidak ada "=== Selesai uninstall ==="). Periksa log uninstall.',
+      tail,
+      code: r.code,
+    };
+  }
+  return { ok: true, output: r.output, tail };
+}
+
+// Install ulang VPS remote: uninstall (backup + hapus total) lalu
+// install --remote fresh. Mengembalikan hasil installRemoteServer,
+// atau error dari tahap uninstall (stage: 'uninstall' / 'install').
+async function reinstallRemoteServer({ ip, domain }) {
+  const un = await uninstallRemoteServer(ip);
+  if (!un.ok) return { ok: false, stage: 'uninstall', message: un.message, tail: un.tail, code: un.code };
+  const inst = await installRemoteServer({ ip, domain });
+  if (!inst.ok) return { ok: false, stage: 'install', message: inst.message, tail: inst.tail, code: inst.code };
+  return { ok: true, output: inst.output, tail: inst.tail };
+}
+
+// Status layanan di VPS remote via SSH (untuk monitoring mendalam).
+// Mengembalikan { reachable, xray, vpnApi, nginx, haproxy, apiHealth }.
+// Semua boolean; reachable=false bila SSH tidak nyambung.
+async function getRemoteServiceStatus(ip) {
+  const cmd = `for s in xray vpn-api nginx haproxy; do printf '%s:%s\\n' "$s" "$(systemctl is-active $s 2>/dev/null || echo unknown)"; done; echo ---; curl -fsS --max-time 8 http://127.0.0.1:5890/health 2>&1 | head -2`;
+  const r = await runSsh(ip, cmd, 30000);
+  const out = String(r.output || '');
+  const parse = (name) => {
+    const m = out.match(new RegExp('^' + name + ':(\\S+)', 'm'));
+    return m ? m[1] === 'active' : false;
+  };
+  return {
+    reachable: r.ok,
+    xray: parse('xray'),
+    vpnApi: parse('vpn-api'),
+    nginx: parse('nginx'),
+    haproxy: parse('haproxy'),
+    apiHealth: /"status"\s*:\s*"success"/.test(out),
+  };
+}
+
+module.exports = { validIp, validDomain, validPublicIp, getMainBotIp, installRemoteServer, readRemoteAuth, getInstallerPublicKey, uninstallRemoteServer, reinstallRemoteServer, getRemoteServiceStatus, INSTALL_KEY };

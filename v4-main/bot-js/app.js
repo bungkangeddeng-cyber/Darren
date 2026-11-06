@@ -165,6 +165,8 @@ bot.action('cancel_flow', async (ctx) => {
 const adminPanel = () => Markup.inlineKeyboard([
   [sBtn('➕ Tambah Server', 'adm_addserver', 'success'), sBtn('❌ Hapus Server', 'adm_delserver', 'danger')],
   [sBtn('🖥️ Install Server Baru', 'adm_installsrv', 'success')],
+  [sBtn('🔄 Install Ulang Server', 'adm_reinstallsrv', 'primary'), sBtn('🗑️ Uninstall Server', 'adm_uninstallsrv', 'danger')],
+  [sBtn('📊 Monitoring Server', 'adm_monitor', 'success')],
   [sBtn('💲 Edit Harga', 'adm_editharga', 'primary'), sBtn('📝 Edit Nama', 'adm_editnama', 'primary')],
   [sBtn('💲 Harga VPN/Role', 'adm_vpnprices', 'primary'), sBtn('👥 Kelola Role', 'adm_roles', 'primary')],
   [sBtn('🌐 Edit Domain', 'adm_editdomain', 'primary'), sBtn('📋 List Server', 'adm_listserver', 'success')],
@@ -2467,6 +2469,205 @@ bot.action('adm_installsrv_yes', async (ctx) => {
     `✅ <b>Server baru terinstal & terdaftar!</b>\n\n🆔 ID: <code>${r.id}</code>\n📝 Nama: <b>${esc(d.nama)}</b>\n📡 IP: <code>${esc(d.ip)}</code>\n🌐 Domain: <code>${esc(d.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>terisi</b>\n💲 Harga: <b>Rp${Number(d.harga).toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer ini sudah muncul di pilihan server saat beli/trial VPN.`,
     { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
   );
+});
+
+// ---------- Uninstall / Install Ulang / Monitoring Server ----------
+// Server utama (bot, server2) TIDAK ada di tabel servers, tapi pengaman
+// ini mencegah admin tidak sengaja meng-uninstall/install-ulang bot
+// sendiri bila server utama sempat didaftarkan manual via Tambah Server.
+async function isMainServerRow(s) {
+  const m = String(s.api_base || '').match(/https?:\/\/([^:/]+)/);
+  const host = m ? m[1] : '';
+  if (!host) return false;
+  if (host === '127.0.0.1' || host === 'localhost') return true;
+  const mainIp = await installServer.getMainBotIp().catch(() => '');
+  return !!mainIp && host === mainIp;
+}
+function serverIp(s) {
+  const m = String(s.api_base || '').match(/https?:\/\/([^:/]+)/);
+  return m ? m[1] : '';
+}
+
+// --- Uninstall Server ---
+bot.action('adm_uninstallsrv', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const rows = await getServers();
+  if (!rows.length) return ctx.reply('❌ Belum ada server. Tambah dulu via 🖥️ Install Server Baru.');
+  const kb = rows.map((s) => [sBtn(`🗑️ ${s.nama} (${esc(s.domain || serverIp(s) || '-')})`, `adm_uninstallsrv_${s.id}`, 'danger')]);
+  kb.push([sBtn('🔙 Kembali', 'adm_back', 'danger')]);
+  await ctx.reply('🗑️ <b>Uninstall Server</b>\n\nPilih server yang akan di-uninstall (stack VPN dihapus total, backup dulu):', {
+    parse_mode: 'HTML', reply_markup: { inline_keyboard: kb },
+  });
+});
+bot.action(/^adm_uninstallsrv_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const { get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  if (await isMainServerRow(s)) return ctx.reply('❌ Server utama (bot) tidak bisa di-uninstall dari sini.');
+  await ctx.reply(
+    `🗑️ <b>Uninstall Server?</b>\n\n📝 <b>${esc(s.nama)}</b> (ID <code>${s.id}</code>)\n📡 IP: <code>${esc(serverIp(s))}</code>\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n\nStack VPN (bot tidak ada di server ini) + Xray + OpenVPN + menu akan <b>dihapus total</b> (backup dulu di VPS itu). Akun VPN yang ada di server ini akan <b>berhenti berfungsi</b>. Server dihapus dari daftar bot.\n\nTindakan ini tidak bisa dibatalkan.`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[sBtn('✅ Ya, uninstall', `adm_uninstallsrv_yes_${id}`, 'danger'), sBtn('🔙 Batal', 'adm_back', 'primary')]] },
+    }
+  );
+});
+bot.action(/^adm_uninstallsrv_yes_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const { get, run } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  if (await isMainServerRow(s)) return ctx.reply('❌ Server utama (bot) tidak bisa di-uninstall dari sini.');
+  const ip = serverIp(s);
+  if (!ip) return ctx.reply('❌ IP server tidak bisa dibaca dari api_base.');
+  await ctx.reply(
+    `⏳ <b>Meng-uninstall server ${esc(s.nama)} (${esc(ip)})...</b>\n\nBackup + hapus stack (bisa beberapa menit). Jangan restart bot selama proses berjalan.`,
+    { parse_mode: 'HTML' }
+  );
+  let un;
+  try { un = await installServer.uninstallRemoteServer(ip); }
+  catch (e) { un = { ok: false, message: 'Uninstall gagal (error internal bot: ' + (e.message || e) + ').', tail: '' }; }
+  if (!un.ok) {
+    return ctx.reply(
+      `❌ <b>Uninstall GAGAL — server tetap terdaftar.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n\nAlasan: ${esc(un.message || 'tidak diketahui')}\n\n${un.tail ? `<b>Log akhir:</b>\n<pre>${esc(un.tail.slice(-1500))}</pre>` : ''}\nPeriksa VPS/kunci SSH-nya, lalu ulangi.`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  await run('DELETE FROM servers WHERE id = ?', [id]);
+  return ctx.reply(
+    `✅ <b>Server ter-uninstall & dihapus dari daftar.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n\nStack VPN di VPS itu sudah dihapus total (backup tersimpan di VPS itu). Akun VPN di server ini sudah tidak berfungsi.`,
+    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+  );
+});
+
+// --- Install Ulang Server ---
+bot.action('adm_reinstallsrv', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const rows = await getServers();
+  if (!rows.length) return ctx.reply('❌ Belum ada server. Tambah dulu via 🖥️ Install Server Baru.');
+  const kb = rows.map((s) => [sBtn(`🔄 ${s.nama} (${esc(s.domain || serverIp(s) || '-')})`, `adm_reinstallsrv_${s.id}`, 'primary')]);
+  kb.push([sBtn('🔙 Kembali', 'adm_back', 'danger')]);
+  await ctx.reply('🔄 <b>Install Ulang Server</b>\n\nPilih server yang akan di-install ulang (uninstall total lalu install fresh — harga + domain dipertahankan):', {
+    parse_mode: 'HTML', reply_markup: { inline_keyboard: kb },
+  });
+});
+bot.action(/^adm_reinstallsrv_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const { get } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  if (await isMainServerRow(s)) return ctx.reply('❌ Server utama (bot) tidak bisa di-install ulang dari sini.');
+  await ctx.reply(
+    `🔄 <b>Install Ulang Server?</b>\n\n📝 <b>${esc(s.nama)}</b> (ID <code>${s.id}</code>)\n📡 IP: <code>${esc(serverIp(s))}</code>\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n💲 Harga: <b>Rp${Number(s.harga).toLocaleString('id-ID')}/hari</b>\n\nStack lama dibackup lalu dihapus total, lalu install fresh (5–15 menit). Akun VPN lama di server ini <b>ikut terhapus</b> (Xray baru, akun kosong). Nama, domain, dan harga dipertahankan; kunci API baru dibaca otomatis.\n\nTindakan ini tidak bisa dibatalkan.`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[sBtn('✅ Ya, install ulang', `adm_reinstallsrv_yes_${id}`, 'primary'), sBtn('🔙 Batal', 'adm_back', 'primary')]] },
+    }
+  );
+});
+bot.action(/^adm_reinstallsrv_yes_(\d+)$/, async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const id = parseInt(ctx.match[1], 10);
+  const { get, run } = require('./src/db');
+  const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
+  if (!s) return ctx.reply('⚠️ Server tidak ditemukan.');
+  if (await isMainServerRow(s)) return ctx.reply('❌ Server utama (bot) tidak bisa di-install ulang dari sini.');
+  const ip = serverIp(s);
+  if (!ip) return ctx.reply('❌ IP server tidak bisa dibaca dari api_base.');
+  const apiBase = `http://${ip}:5890`;
+  await ctx.reply(
+    `⏳ <b>Meng-install ulang server ${esc(s.nama)} (${esc(ip)})...</b>\n\nUninstall total lalu install fresh (bisa 5–15 menit). Jangan restart bot selama proses berjalan. Hasil akan dikirim di sini.`,
+    { parse_mode: 'HTML' }
+  );
+  let re;
+  try { re = await installServer.reinstallRemoteServer({ ip, domain: s.domain || '' }); }
+  catch (e) { re = { ok: false, stage: '?', message: 'Install ulang gagal (error internal bot: ' + (e.message || e) + ').', tail: '' }; }
+  if (!re.ok) {
+    return ctx.reply(
+      `❌ <b>Install Ulang GAGAL di tahap ${esc(re.stage || '?')} — server tetap terdaftar dengan data lama.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n\nAlasan: ${esc(re.message || 'tidak diketahui')}\n\n${re.tail ? `<b>Log akhir:</b>\n<pre>${esc(re.tail.slice(-1500))}</pre>` : ''}\nPeriksa VPS/kunci SSH-nya, lalu ulangi.`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  const apiAuth = await installServer.readRemoteAuth(ip).catch(() => null);
+  if (!apiAuth) {
+    return ctx.reply(
+      `⚠️ <b>Server ter-install ulang, tapi kunci API baru tidak bisa dibaca.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n\nStack sudah fresh, tetapi bot tidak bisa membaca <code>/etc/vpn-api/auth.env</code> di VPS itu. Perbarui kunci API server ini manual via 🔑 Edit API Key (baca kunci dari file itu lewat SSH).`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  const health = await srvTools.checkServerHealth(apiBase).catch(() => ({ ok: false, message: 'Health check gagal (error internal).' }));
+  if (!health.ok) {
+    return ctx.reply(
+      `⚠️ <b>Server ter-install ulang, tapi health check API gagal.</b>\n\n📝 <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n\nAlasan: ${esc(health.message)}\n\nKunci API baru sudah dibaca, tapi server belum bisa dipakai. Periksa service vpn-api di VPS itu.`,
+      { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+    );
+  }
+  await run('UPDATE servers SET api_auth = ? WHERE id = ?', [apiAuth, id]);
+  return ctx.reply(
+    `✅ <b>Server berhasil di-install ulang & aktif!</b>\n\n🆔 ID: <code>${s.id}</code>\n📝 Nama: <b>${esc(s.nama)}</b>\n📡 IP: <code>${esc(ip)}</code>\n🌐 Domain: <code>${esc(s.domain || '-')}</code>\n🔌 API: <code>${esc(apiBase)}</code>\n🔑 Key: <b>baru (diperbarui otomatis)</b>\n💲 Harga: <b>Rp${Number(s.harga).toLocaleString('id-ID')}/hari</b>\n🟢 Status: <b>AKTIF (health check lolos)</b>\n\nServer sudah bisa dipakai lagi. Akun VPN lama di server ini sudah terhapus (Xray fresh).`,
+    { parse_mode: 'HTML', reply_markup: adminPanel().reply_markup }
+  );
+});
+
+// --- Monitoring Server ---
+async function monitorText() {
+  const local = await liveServer.checkLocal();
+  const rows = await getServers().catch(() => []);
+  const lines = ['📊 <b>MONITORING SERVER</b>\n'];
+  lines.push('<b>📍 Lokal (server2 — bot utama)</b>');
+  lines.push(`vpn-api: ${local.vpnApi.ok ? '✅ ONLINE' : '❌ OFFLINE'}${local.vpnApi.ms >= 0 ? ` (${local.vpnApi.ms} ms)` : ''}`);
+  lines.push(`Xray: ${local.xrayOpen}/${local.xrayTotal} port terbuka`);
+  lines.push(`nginx (:81): ${local.nginx ? '✅ aktif' : '❌ tidak merespons'}`);
+  lines.push(`haproxy (:443): ${local.haproxy ? '✅ aktif' : '❌ tidak merespons'}`);
+  if (!rows.length) {
+    lines.push('\n<i>Belum ada server tambahan di tabel servers.</i>');
+  } else {
+    lines.push('\n<b>🌐 Server tambahan</b>');
+    const checks = await Promise.all(rows.map(async (s) => {
+      const ip = serverIp(s);
+      const health = await liveServer.checkRemote(s).catch(() => ({ ok: false, ms: -1 }));
+      let svc = null;
+      if (ip && installServer.validIp(ip)) svc = await installServer.getRemoteServiceStatus(ip).catch(() => null);
+      return { s, ip, health, svc };
+    }));
+    for (const { s, ip, health, svc } of checks) {
+      const apiSt = health.ok ? `✅ ONLINE (${health.ms} ms)` : '❌ OFFLINE';
+      lines.push(`\n• <b>${esc(s.nama)}</b> — <code>${esc(s.domain || ip || '-')}</code>${s.active ? '' : ' (nonaktif)'}`);
+      lines.push(`  API: ${apiSt}`);
+      if (svc) {
+        if (!svc.reachable) lines.push('  SSH: ❌ tidak nyambung (kunci/host mati?)');
+        else lines.push(`  Xray: ${svc.xray ? '✅' : '❌'}  vpn-api: ${svc.vpnApi ? '✅' : '❌'}  nginx: ${svc.nginx ? '✅' : '❌'}  haproxy: ${svc.haproxy ? '✅' : '❌'}`);
+      }
+    }
+  }
+  return lines.join('\n');
+}
+const monitorKb = () => ({ inline_keyboard: [[sBtn('🔄 Refresh', 'adm_monitor_refresh', 'primary'), sBtn('🔙 Kembali', 'adm_back', 'danger')]] });
+bot.action('adm_monitor', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  try { await ctx.editMessageText(await monitorText(), { parse_mode: 'HTML', reply_markup: monitorKb() }); }
+  catch (_) {
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, ctx.callbackQuery?.message?.message_id); } catch (_) {}
+    await ctx.reply(await monitorText(), { parse_mode: 'HTML', reply_markup: monitorKb() });
+  }
+});
+bot.action('adm_monitor_refresh', async (ctx) => {
+  if (!await admin.hasAdminAccess(ctx)) { await safeCb(ctx); return; }
+  await safeCb(ctx);
+  const text = await monitorText();
+  try { await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: monitorKb() }); }
+  catch (_) { await ctx.reply(text, { parse_mode: 'HTML', reply_markup: monitorKb() }); }
 });
 
 // Hapus server: tampilkan daftar dengan tombol hapus
